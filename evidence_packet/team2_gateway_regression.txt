@@ -1,0 +1,12 @@
+...                                                                      [100%]
+============================== warnings summary ===============================
+backend/tests/gateway/test_gateway_imports.py::test_gateway_imports
+  C:\Users\Ashmit Pandey\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\_pytest\python.py:198: PytestReturnNotNoneWarning: Expected None, but backend/tests/gateway/test_gateway_imports.py::test_gateway_imports returned False, which will be an error in a future version of pytest.  Did you mean to use `assert` instead of `return`?
+    warnings.warn(
+
+backend/tests/gateway/test_gateway_imports.py::test_main_app_import
+  C:\Users\Ashmit Pandey\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0\LocalCache\local-packages\Python311\site-packages\_pytest\python.py:198: PytestReturnNotNoneWarning: Expected None, but backend/tests/gateway/test_gateway_imports.py::test_main_app_import returned False, which will be an error in a future version of pytest.  Did you mean to use `assert` instead of `return`?
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+3 passed, 2 warnings in 20.25s

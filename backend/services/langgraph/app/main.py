@@ -72,7 +72,10 @@ app = FastAPI(
     title="BHIV LangGraph Orchestrator",
     version="1.0.0",
     description="AI-driven workflow orchestration for BHIV HR Platform with API Key Authentication",
-    tags_metadata=[
+    # FastAPI's kwarg for OpenAPI tag descriptions is `openapi_tags`
+    # (`tags_metadata` is only the tutorial's variable name and raises
+    # TypeError: unexpected keyword argument — it crashed the service at boot).
+    openapi_tags=[
         {
             "name": "Core API Endpoints",
             "description": "Service health and system information"

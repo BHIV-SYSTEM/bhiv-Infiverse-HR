@@ -14,6 +14,7 @@ Usage:
   python run_services.py gateway   # Start only gateway
   python run_services.py agent     # Start only agent
   python run_services.py langgraph # Start only langgraph
+  python run_services.py --stop    # Stop anything left on ports 8000/9000/9001
 """
 
 import subprocess
@@ -23,13 +24,14 @@ import time
 import signal
 from pathlib import Path
 
-# Fix Windows console encoding for emojis
+# Fix Windows console encoding for emojis (line-buffered so output shows live)
 if sys.platform == 'win32':
     try:
-        # Try to set UTF-8 encoding for Windows console
-        import codecs
-        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
-        sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+        # Line-buffered UTF-8 wrapper: every print appears immediately instead
+        # of sitting in an 8KB block buffer (which looked like a hang).
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
     except:
         # Fallback: create safe print function that removes emojis
         def safe_print(*args, **kwargs):
@@ -96,6 +98,12 @@ COMMON_ENV = {
     "HF_HUB_DISABLE_PROGRESS_BARS": os.getenv("HF_HUB_DISABLE_PROGRESS_BARS", "1"),
     "TRANSFORMERS_VERBOSITY": os.getenv("TRANSFORMERS_VERBOSITY", "error"),
     "TOKENIZERS_PARALLELISM": os.getenv("TOKENIZERS_PARALLELISM", "false"),
+    # Windows: force UTF-8 for child pipes/consoles so emoji in log lines
+    # (e.g. print("❌ ...")) doesn't crash services with UnicodeEncodeError
+    # ('charmap' codec can't encode character '\u274C').
+    "PYTHONUTF8": "1",
+    "PYTHONIOENCODING": "utf-8",
+    "PYTHONUNBUFFERED": "1",
 }
 
 # Track running processes
@@ -139,10 +147,12 @@ def start_service(name, service_config, env_vars):
     if not service_dir.exists():
         print(f"[ERROR] Service directory not found: {service_dir}")
         return None
-    
+
     port = service_config["port"]
     if not check_port(port):
-        print(f"[WARNING] Port {port} is already in use. {service_config['name']} may already be running.")
+        owner = _port_owner(port)
+        hint = f" (PID {owner} — run: python run_services.py --stop)" if owner else ""
+        print(f"[WARNING] Port {port} is already in use. {service_config['name']} may already be running{hint}.")
         return None
     
     print(f"\n[STARTING] Starting {service_config['name']} on port {port}...")
@@ -182,6 +192,102 @@ def stream_output(process, name):
         pass
 
 
+def _port_owner(port):
+    """PID listening on a local TCP port, or None if the port is free."""
+    try:
+        if os.name == 'nt':
+            out = subprocess.run(
+                ["netstat", "-ano", "-p", "tcp"],
+                capture_output=True, text=True, errors="replace"
+            ).stdout
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 5 and parts[3].upper() == "LISTENING":
+                    if parts[1].rsplit(":", 1)[-1] == str(port):
+                        return int(parts[4])
+        else:
+            out = subprocess.run(
+                ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                capture_output=True, text=True, errors="replace"
+            ).stdout
+            pids = [int(p) for p in out.split() if p.strip().isdigit()]
+            return pids[0] if pids else None
+    except Exception:
+        return None
+    return None
+
+
+def _kill_process_tree(pid):
+    """Kill a service and its children.
+
+    `uvicorn --reload` spawns a worker; killing only the master leaves an
+    orphan still holding the port, which is why the next run reported
+    "Port 8000 is already in use".
+    """
+    if os.name == 'nt':
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _uvicorn_masters_for(port):
+    """PIDs of `uvicorn --reload` processes started for ``port`` (Windows).
+
+    The reload master is the *parent* of the process that owns the listening
+    socket, so killing only the socket owner leaves a master that respawns a
+    worker and re-grabs the port — the next run then reports "port already in
+    use" again. Match on the service's own `--port` argument so unrelated
+    python processes are never touched.
+    """
+    if os.name != 'nt':
+        return []
+    try:
+        script = (
+            "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" "
+            f"| Where-Object {{ $_.CommandLine -like '*uvicorn*--port {port}*' }} "
+            "| ForEach-Object { $_.ProcessId }"
+        )
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True, text=True, errors="replace"
+        ).stdout
+        return [int(t) for t in out.split() if t.strip().isdigit()]
+    except Exception:
+        return []
+
+
+def stop_ports():
+    """Free the ports this launcher owns (explicit: `python run_services.py --stop`)."""
+    print("\n[STOP] Freeing launcher ports...")
+    for cfg in SERVICES.values():
+        port = cfg["port"]
+        owner = _port_owner(port)
+        masters = _uvicorn_masters_for(port)
+        if owner is None and not masters:
+            print(f"   [OK] :{port} already free")
+            continue
+        print(f"   [..] :{port} held by PID {owner or masters[0]} — stopping {cfg['name']} (whole tree + reload master)")
+        for _attempt in range(3):
+            pids = []
+            owner = _port_owner(port)
+            if owner:
+                pids.append(owner)
+            pids.extend(p for p in _uvicorn_masters_for(port) if p not in pids)
+            if not pids:
+                break
+            for pid in pids:
+                _kill_process_tree(pid)
+            time.sleep(1)
+        still = _port_owner(port)
+        print(f"   [OK] :{port} freed" if still is None else f"   [WARNING] :{port} still busy (PID {still})")
+
+
 def stop_all_services():
     """Stop all running services."""
     print("\n\n[STOPPING] Stopping all services...")
@@ -193,9 +299,12 @@ def stop_all_services():
                 process.terminate()
             process.wait(timeout=5)
             print(f"   [OK] Stopped {name}")
-        except Exception as e:
-            print(f"   [WARNING] Force killing {name}")
-            process.kill()
+        except Exception:
+            print(f"   [WARNING] Force killing {name} (tree)")
+            try:
+                _kill_process_tree(process.pid)
+            except Exception:
+                pass
     processes.clear()
 
 
@@ -234,6 +343,10 @@ def main():
     print(f"Backend Directory: {get_backend_dir()}")
     
     # Parse arguments
+    if sys.argv[1:2] and sys.argv[1].lower() in ("--stop", "stop"):
+        stop_ports()
+        sys.exit(0)
+
     services_to_start = sys.argv[1:] if len(sys.argv) > 1 else list(SERVICES.keys())
     
     # Validate service names
@@ -245,7 +358,14 @@ def main():
     
     # Load environment
     env_vars = load_env_file()
-    print(f"\n[INFO] Database: MongoDB Atlas (bhiv_hr)")
+    db_uri = env_vars.get("DATABASE_URL") or env_vars.get("MONGODB_URI") or ""
+    db_name = env_vars.get("MONGODB_DB_NAME", "bhiv_hr")
+    if db_uri:
+        db_label = "MongoDB Atlas" if db_uri.startswith("mongodb+srv://") else "MongoDB"
+        print(f"\n[INFO] Database: {db_label} ({db_name})")
+    else:
+        print("\n[INFO] Database: not configured — services use their in-memory "
+              "fallbacks (set DATABASE_URL in backend/.env for MongoDB persistence)")
     print(f"[INFO] Environment: {env_vars.get('ENVIRONMENT', 'development')}")
     
     # Register signal handler

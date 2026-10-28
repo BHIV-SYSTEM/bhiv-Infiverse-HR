@@ -1,0 +1,70 @@
+================ 1. PRAVESH BRIDGE — SAMPADA GATEWAY ================
+-- status:
+{"success":true,"bridge":{"enabled":true,"app_slug":"sampada","cookie_name":"blackhole_token","require_app_claim":true,"secret_configured":true,"mode":"read-only"}}
+-- session with valid cookie (expect 200):
+200
+{"success":true,"authenticated":true,"app":"sampada","mode":"read-only","user":{"user_id":"bhiv_smoke_1","email":"smoke@example.com","tenant_id":"tenant_default","roles":["candidate"],"permissions":["apps:read"],"allowedApps":["sampada","hackaverse"]},"identity_mapping":{"local_identity":"pravesh:bhiv_smoke_1","link_status":"db_unavailable","linked_local_user_id":null,"merge_policy":"email_is_linking_attribute_only"}}
+-- session without cookie (expect 401):
+401
+-- session with wrong app slug (expect 403):
+403
+{"detail":"Access denied: app 'sampada' not in token allowedApps"}
+================ 2. PRAVESH BRIDGE — HACKAVERSE ================
+-- status:
+{"success":true,"bridge":{"enabled":true,"app_slug":"hackaverse","cookie_name":"blackhole_token","require_app_claim":true,"secret_configured":true,"mode":"read-only"}}
+-- session with valid cookie (expect 200):
+200
+{"success":true,"authenticated":true,"app":"hackaverse","mode":"read-only","user":{"user_id":"bhiv_smoke_1","email":"smoke@example.com","tenant_id":"tenant_default","roles":["candidate"],"permissions":["apps:read"],"allowedApps":["sampada","hackaverse"]},"identity_mapping":{"local_identity":"pravesh:bhiv_smoke_1","link_status":"no_local_account","linked_local_user_id":null,"merge_policy":"email_is_linking_attribute_only"}}
+-- session without cookie (expect 401):
+401
+================ 3. CV BUILDER — FULL FLOW ================
+-- templates:
+{"templates":[{"id":"professional","label":"Professional — clean, conventional, suitable for general employment"},{"id":"modern","label":"Modern — contemporary layout with flexible sections and typography"},{"id":"minimal","label":"Minimal — simple, compact, readable and easy to print"}],"policy":"templates only restyle content — switching never erases it","schema_version":"cv-1.0"}
+-- prefill (no authorised record -> honest blanks + questions):
+missing: ['full_name', 'email', 'phone', 'location']
+first question: Write 2–4 sentences summarising your professional profile. This is your wordin
+summary field: {'value': None, 'source': 'none', 'verified': False}
+-- created draft: cv_43c5bb503896453a
+PUT content+template -> 200
+-- template switch keeps content:
+template: modern
+summary text: '  backend   engineer. honest words only. '
+-- suggest (bounded, review-before-apply):
+proposals: 1
+Backend engineer. Honest words only.
+policy: {'no_invention': True, 'review_required_before_apply': True, 'wording_never_rewritten': True}
+-- assemble preview:
+html starts: <!DOCTYPE html><html><head><meta charset
+warnings: ['whitespace']
+-- export BEFORE approval (expect 403):
+403
+{"detail":"Export blocked: the CV must be reviewed and approved first (POST /cv/drafts/cv_43c5bb503896453a/approve with confirmation 'I have reviewed this CV')"}
+-- approve with wrong phrase (expect 422):
+422
+-- approve with exact phrase (expect 200):
+200
+-- export AFTER approval (expect 200):
+print_ready: True filename: cv_service_cv_43c5bb503896453a.html
+contains name: True
+-- recruiter/other-user access to this draft (expect 404 for foreign key):
+GET foreign draft -> 404
+================ 4. SAMPADA IDENTITY + LIVE ENROLMENT TO HACKAVERSE ================
+-- intake #1:
+status: created id: sd_e2b0340949fc4947 canonical: UNKNOWN institute: MSSU warnings: ['canonical_candidate_id not supplied by source — recorded as UNKNOWN; Sampada does not invent canonical ids']
+-- intake #2 (same source_reference = retry, expect reused, no duplicate):
+status: reused id: sd_e2b0340949fc4947
+-- publish enrolment to HackaVerse (real HTTP):
+delivery: LIVE hackaverse_status: 200 detail: accepted by HackaVerse (200)
+idempotency_key: sd_e2b0340949fc4947:MSSU-2026-B1
+-- publish #2 (same key, expect HackaVerse reuse, no duplicate):
+delivery: LIVE hackaverse_status: 200
+-- HackaVerse stored enrolment:
+storage: mongo ingest_count: 2
+sampada_local_id: sd_e2b0340949fc4947 institute: MSSU cohort: MSSU-2026-B1 canonical_status: UNKNOWN
+-- HackaVerse cohort listing:
+cohort count: 1
+-- invalid institute on HackaVerse side (expect 422):
+422
+-- wrong schema_version (expect 422):
+422
+================ SMOKE COMPLETE ================

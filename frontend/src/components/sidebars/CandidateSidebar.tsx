@@ -8,7 +8,7 @@ export default function CandidateSidebar() {
   const location = useLocation()
   const navigate = useNavigate()
   const { isCollapsed, isMobileOpen, closeMobile } = useSidebar()
-  const { signOut } = useAuth()
+  const { signOut, isGuest } = useAuth()
   
   const navItems = [
     {
@@ -156,18 +156,31 @@ export default function CandidateSidebar() {
             )}
           </div>
         </div>
-        {/* Logout Button */}
+        {/* Sign in (guest) / Logout (signed-in) */}
         <div className="p-3 pt-0">
-          <button
-            onClick={handleLogout}
-            title={isCollapsed ? 'Logout' : undefined}
-            className={`flex items-center ${isCollapsed ? 'justify-center' : 'gap-2'} w-full px-2.5 py-2 rounded-lg bg-red-500/10 hover:bg-red-500 text-red-600 hover:text-white border border-red-200 dark:border-red-800 hover:border-red-500 transition-all duration-200`}
-          >
-            <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-            </svg>
-            {!isCollapsed && <span className="text-sm font-medium">Logout</span>}
-          </button>
+          {isGuest ? (
+            <button
+              onClick={() => navigate('/auth')}
+              title={isCollapsed ? 'Sign in' : undefined}
+              className={`flex items-center ${isCollapsed ? 'justify-center' : 'gap-2'} w-full px-2.5 py-2 rounded-lg bg-blue-500/10 hover:bg-blue-500 text-blue-600 hover:text-white border border-blue-200 dark:border-blue-800 hover:border-blue-500 transition-all duration-200`}
+            >
+              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7" />
+              </svg>
+              {!isCollapsed && <span className="text-sm font-medium">Sign in</span>}
+            </button>
+          ) : (
+            <button
+              onClick={handleLogout}
+              title={isCollapsed ? 'Logout' : undefined}
+              className={`flex items-center ${isCollapsed ? 'justify-center' : 'gap-2'} w-full px-2.5 py-2 rounded-lg bg-red-500/10 hover:bg-red-500 text-red-600 hover:text-white border border-red-200 dark:border-red-800 hover:border-red-500 transition-all duration-200`}
+            >
+              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+              </svg>
+              {!isCollapsed && <span className="text-sm font-medium">Logout</span>}
+            </button>
+          )}
         </div>
       </div>
     </aside>

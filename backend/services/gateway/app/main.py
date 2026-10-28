@@ -1,4 +1,27 @@
 
+# Load local gateway configuration (backend/.env) before anything reads the
+# environment: Pravesh SSO secret, HackaVerse enrolment URL/key, gateway keys.
+# Deployed environments inject these directly, so a missing file is the normal
+# case and changes nothing; existing process env always wins (override=False).
+import os as _env_os
+try:
+    from dotenv import load_dotenv as _load_dotenv
+
+    _env_file = _env_os.path.join(
+        _env_os.path.dirname(
+            _env_os.path.dirname(
+                _env_os.path.dirname(
+                    _env_os.path.dirname(_env_os.path.abspath(__file__))
+                )
+            )
+        ),
+        ".env",
+    )
+    if _env_os.path.exists(_env_file):
+        _load_dotenv(_env_file, override=False)
+except Exception:
+    pass
+
 from fastapi import FastAPI, HTTPException, Depends, Security, Response, Request, File, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -21,7 +44,7 @@ import bcrypt
 import httpx
 from collections import defaultdict
 # MongoDB imports (migrated from SQLAlchemy/PostgreSQL)
-from app.database import get_mongo_db, get_mongo_client
+from app.database import get_mongo_db, get_mongo_client, DatabaseNotConfiguredError
 from app.db_helpers import find_one_by_field, find_many, count_documents, insert_one, update_one, delete_one, convert_objectid_to_str
 from app.control_center_governance import (
     assert_control_center_access,
@@ -177,6 +200,17 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         }
     )
 
+
+@app.exception_handler(DatabaseNotConfiguredError)
+async def database_not_configured_handler(request: Request, exc: DatabaseNotConfiguredError):
+    """No-database dev mode: clean 503 instead of a 500 traceback."""
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": "MongoDB is not configured. Set DATABASE_URL in backend/.env to enable persistence.",
+        },
+    )
+
 # CORS Configuration - reads from CORS_ORIGINS env var (comma-separated)
 # Supports all Vercel preview deployments via regex.
 cors_origins_env = os.getenv("CORS_ORIGINS", "").strip()
@@ -196,7 +230,11 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins_list,
     allow_origin_regex=r"https://.*\.onrender\.com|https://.*\.vercel\.app|https://.*\.blackholeinfiverse\.com",
-    allow_credentials=False,
+    # Credentials must be allowed for the Pravesh (blackhole_auth) SSO cookie
+    # exchange: the browser POSTs to /api/v1/pravesh/exchange with
+    # credentials: 'include'. Origins stay an explicit list/regex (never "*"),
+    # so credentialed responses remain spec-compliant.
+    allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
 )
@@ -267,6 +305,54 @@ try:
     print("Workforce governance routes loaded")
 except ImportError as e:
     print(f"WARNING: workforce governance routes not available: {e}")
+
+# Pravesh (blackhole_auth) SSO read-only bridge — identity verification only,
+# never creates or merges accounts. Disabled unless PRAVESH_JWT_SECRET is set.
+try:
+    import sys as _sys_pravesh
+    import os as _os_pravesh
+
+    _gw_dir_pravesh = _os_pravesh.path.dirname(_os_pravesh.path.dirname(__file__))
+    if _gw_dir_pravesh not in _sys_pravesh.path:
+        _sys_pravesh.path.insert(0, _gw_dir_pravesh)
+    from routes.pravesh_routes import router as pravesh_router
+
+    app.include_router(pravesh_router, prefix="/api/v1", tags=["Pravesh SSO"])
+    print("Pravesh SSO bridge routes loaded")
+except ImportError as e:
+    print(f"WARNING: Pravesh SSO bridge routes not available: {e}")
+
+# Sampada identity module — canonical candidate id, institute/cohort mapping,
+# Abhiruchi intake (idempotent) and versioned HackaVerse enrolment publishing.
+try:
+    import sys as _sys_ident
+    import os as _os_ident
+
+    _gw_dir_ident = _os_ident.path.dirname(_os_ident.path.dirname(__file__))
+    if _gw_dir_ident not in _sys_ident.path:
+        _sys_ident.path.insert(0, _gw_dir_ident)
+    from app.identity.routes import router as identity_router
+
+    app.include_router(identity_router, prefix="/api/v1")
+    print("Identity & enrolment routes loaded")
+except ImportError as e:
+    print(f"WARNING: identity routes not available: {e}")
+
+# CV builder — authorised prefill, shared content model + 3 templates,
+# bounded AI suggestions, approval gate before export.
+try:
+    import sys as _sys_cv
+    import os as _os_cv
+
+    _gw_dir_cv = _os_cv.path.dirname(_os_cv.path.dirname(__file__))
+    if _gw_dir_cv not in _sys_cv.path:
+        _sys_cv.path.insert(0, _gw_dir_cv)
+    from app.cv.routes import router as cv_router
+
+    app.include_router(cv_router, prefix="/api/v1")
+    print("CV builder routes loaded")
+except ImportError as e:
+    print(f"WARNING: CV builder routes not available: {e}")
 
 # ── Auth dependency resolution ─────────────────────────────────────────────────
 # Must be defined BEFORE any @app route that uses Depends(get_auth).
@@ -1944,7 +2030,7 @@ async def get_all_candidates(
         }
     except Exception as e:
         import traceback
-        print(f"❌ Error in get_all_candidates: {str(e)}")
+        print(f"Error in get_all_candidates: {str(e)}")
         print(traceback.format_exc())
         return {"candidates": [], "total": 0, "error": str(e)}
 
@@ -1990,7 +2076,7 @@ async def get_notification_history(
         }
     except Exception as e:
         import traceback
-        print(f"❌ Error in get_notification_history: {str(e)}")
+        print(f"Error in get_notification_history: {str(e)}")
         print(traceback.format_exc())
         return {"candidate_id": candidate_id, "history": [], "error": str(e)}
 
@@ -4371,6 +4457,9 @@ async def get_recruiter_current_connection(auth=Depends(get_auth)):
             "connection_id": connection_id if connection_id else None,
             "company_name": company_name if company_name else None
         }
+    except DatabaseNotConfiguredError:
+        # No-database dev mode: report "not connected" instead of a 500
+        return {"connection_id": None, "company_name": None}
     except Exception as e:
         logger.exception("get_recruiter_current_connection failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -5176,7 +5265,7 @@ async def candidate_register(candidate_data: CandidateRegister):
                 print(f"✅ Welcome email sent successfully to {candidate_data.email}")
         except Exception as email_error:
             # Log error but don't fail registration
-            print(f"❌ Failed to send welcome email to {candidate_data.email}: {email_error}")
+            print(f"Failed to send welcome email to {candidate_data.email}: {email_error}")
         
         return {
             "success": True,
@@ -5349,14 +5438,14 @@ async def send_grouped_notifications(request: PerJobNotificationRequest, auth=De
                     print(f"✅ Sent grouped notification to {candidate.get('name')} for {len(job_titles)} job(s): {grouped_job_title}")
                 except Exception as send_error:
                     failed_count += 1
-                    print(f"❌ Error sending notification: {send_error}")
+                    print(f"Error sending notification: {send_error}")
                 
                 # Small delay to prevent overwhelming the email service
                 await asyncio.sleep(0.5)
             
             except Exception as candidate_error:
                 failed_count += 1
-                print(f"❌ Error processing candidate {candidate_id_str}: {candidate_error}")
+                print(f"Error processing candidate {candidate_id_str}: {candidate_error}")
         
         return {
             "success": True,
@@ -5367,7 +5456,7 @@ async def send_grouped_notifications(request: PerJobNotificationRequest, auth=De
         }
     
     except Exception as e:
-        print(f"❌ Error in send_grouped_notifications: {e}")
+        print(f"Error in send_grouped_notifications: {e}")
         return {
             "success": False,
             "error": str(e),
@@ -5474,11 +5563,11 @@ async def send_per_job_notifications(request: PerJobNotificationRequest, auth=De
                         print(f"✅ Sent notification to {candidate.get('name')} for job {job_title}")
                     except Exception as send_error:
                         failed_count += 1
-                        print(f"❌ Error sending notification: {send_error}")
+                        print(f"Error sending notification: {send_error}")
             
             except Exception as candidate_error:
                 failed_count += 1
-                print(f"❌ Error processing candidate {candidate_id_str}: {candidate_error}")
+                print(f"Error processing candidate {candidate_id_str}: {candidate_error}")
         
         return {
             "success": True,
@@ -5489,7 +5578,7 @@ async def send_per_job_notifications(request: PerJobNotificationRequest, auth=De
         }
     
     except Exception as e:
-        print(f"❌ Error in send_per_job_notifications: {e}")
+        print(f"Error in send_per_job_notifications: {e}")
         return {
             "success": False,
             "error": str(e),
@@ -5557,6 +5646,35 @@ async def candidate_login(login_data: CandidateLogin):
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+@app.post("/v1/auth/guest-session", tags=["Auth"])
+async def create_guest_session():
+    """Mint a demo guest (candidate) JWT so the UI opens without any sign-in."""
+    signing_secret = (os.getenv("CANDIDATE_JWT_SECRET_KEY") or "").strip()
+    if not signing_secret:
+        raise HTTPException(
+            status_code=503,
+            detail="CANDIDATE_JWT_SECRET_KEY not configured for guest sessions",
+        )
+    now = int(datetime.now(timezone.utc).timestamp())
+    payload = {
+        "sub": "guest:demo",
+        "user_id": "guest:demo",
+        "candidate_id": "guest:demo",
+        "email": "",
+        "name": "Guest User",
+        "role": "candidate",
+        "auth_type": "guest_demo",
+        "exp": now + 86400,
+    }
+    token = jwt.encode(payload, signing_secret, algorithm="HS256")
+    return {
+        "success": True,
+        "token": token,
+        "user": {"id": "guest:demo", "email": "", "name": "Guest User", "role": "candidate"},
+    }
+
 
 @app.get("/v1/candidate/profile/{candidate_id}", tags=["Candidate Portal"])
 async def get_candidate_profile(candidate_id: str, auth = Depends(get_auth)):
@@ -5759,7 +5877,7 @@ async def apply_for_job(application: JobApplication, auth = Depends(get_auth)):
                 print(f"⚠️ Could not send email - candidate or job not found")
         except Exception as email_error:
             # Log error but don't fail the application
-            print(f"❌ Failed to send application email: {email_error}")
+            print(f"Failed to send application email: {email_error}")
         
         return {
             "success": True,
@@ -6235,7 +6353,10 @@ async def get_recruiter_application_document(
 async def get_portal_notifications(limit: int = 30, auth=Depends(get_auth)):
     """Get in-app notifications for the authenticated JWT user."""
     ctx = _get_auth_jwt_context(auth)
-    db = await get_mongo_db()
+    try:
+        db = await get_mongo_db()
+    except DatabaseNotConfiguredError:
+        return {"notifications": [], "unread_count": 0}
     lim = max(1, min(limit, 100))
     query = {"recipient_role": ctx["role"], "recipient_user_id": ctx["user_id"]}
     cursor = db.portal_notifications.find(query).sort("created_at", -1).limit(lim)

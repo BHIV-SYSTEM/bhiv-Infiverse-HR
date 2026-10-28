@@ -15,7 +15,10 @@ class Settings(BaseSettings):
     langgraph_service_url: str = "http://localhost:9001"
     
     # Database
-    database_url: str = "<DATABASE_URL>"
+    # Empty by default: an unset DATABASE_URL must mean "no MongoDB", not a
+    # placeholder string that later gets resolved as a hostname
+    # ("<DATABASE_URL>:27017 getaddrinfo failed"). Set it in backend/.env.
+    database_url: str = ""
     
     # JWT Secrets
     jwt_secret_key: str = "<JWT_SECRET_KEY>"

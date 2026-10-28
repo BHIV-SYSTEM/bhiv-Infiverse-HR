@@ -59,6 +59,15 @@ export default function RecruiterSidebar() {
       ),
     },
     {
+      title: 'CV Builder',
+      path: '/recruiter/cv-builder',
+      icon: (
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m-6-8h6M9 4h6a2 2 0 012 2v12a2 2 0 01-2 2H9a2 2 0 01-2-2V6a2 2 0 012-2z" />
+        </svg>
+      ),
+    },
+    {
       title: 'Create Job Posting',
       path: '/recruiter/create-job',
       icon: (

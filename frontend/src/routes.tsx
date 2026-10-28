@@ -13,6 +13,7 @@ import AppliedJobs from './pages/candidate/AppliedJobs'
 import CandidateInterviews from './pages/candidate/Interviews'
 import CandidateTasks from './pages/candidate/Tasks'
 import CandidateFeedback from './pages/candidate/Feedback'
+import CvBuilder from './pages/candidate/CvBuilder'
 
 // Client Pages
 import ClientDashboard from './pages/client/ClientDashboard'
@@ -31,6 +32,7 @@ export default function AppRoutes() {
       <Route path="/recruiter/applicants/:jobId" element={<ApplicantsMatching />} />
       <Route path="/recruiter/feedback/:candidateId" element={<FeedbackForm />} />
       <Route path="/recruiter/automation" element={<AutomationPanel />} />
+      <Route path="/recruiter/cv-builder" element={<CvBuilder />} />
 
       {/* Candidate Routes */}
       <Route path="/candidate" element={<Navigate to="/candidate/profile" replace />} />
@@ -39,6 +41,7 @@ export default function AppRoutes() {
       <Route path="/candidate/interviews" element={<CandidateInterviews />} />
       <Route path="/candidate/tasks" element={<CandidateTasks />} />
       <Route path="/candidate/feedback" element={<CandidateFeedback />} />
+      <Route path="/candidate/cv-builder" element={<CvBuilder />} />
 
       {/* Client Routes */}
       <Route path="/client" element={<ClientDashboard />} />

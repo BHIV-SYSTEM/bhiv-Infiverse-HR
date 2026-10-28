@@ -88,10 +88,12 @@ export function PublicRoute({ children }: { children: React.ReactNode }) {
     )
   }
 
-  // If user is already authenticated, redirect to their dashboard
+  // If user is already authenticated, redirect to their dashboard.
+  // Guests keep access to /auth so they can sign in for real.
   const isAuthenticated = !!user || authStorage.getItem('isAuthenticated') === 'true'
-  
-  if (isAuthenticated && userRole) {
+  const isGuest = user?.isGuest === true
+
+  if (isAuthenticated && userRole && !isGuest) {
     const roleRedirects: Record<string, string> = {
       candidate: '/candidate/dashboard',
       recruiter: '/recruiter',

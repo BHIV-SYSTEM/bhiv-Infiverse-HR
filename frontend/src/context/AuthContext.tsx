@@ -6,6 +6,7 @@ interface User {
   email: string;
   name?: string;
   role?: string;
+  isGuest?: boolean;
 }
 
 interface AuthContextType {
@@ -14,6 +15,7 @@ interface AuthContextType {
   signIn: (email: string, password: string) => Promise<{ error: any }>;
   signUp: (email: string, password: string, userData: { name: string; role: string; company?: string; phone?: string }) => Promise<{ error: any; user?: User }>;
   signOut: () => Promise<void>;
+  isGuest: boolean;
   userRole: string | null;
   userName: string | null;
 }
@@ -25,34 +27,134 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    // Initialize auth from stored JWT token; derive role from token so role is correct on reload
-    const token = authStorage.getItem('auth_token');
-    const userData = authStorage.getItem('user_data');
-    
-    if (token && userData) {
+    // Initialize auth from stored JWT token; derive role from token so role is correct on reload.
+    // When there is no valid local session, try Pravesh (blackhole_auth) SSO
+    // auto-login: the blackhole_token cookie is sent with credentials:'include'
+    // and a valid session means the user never sees the sign-in page.
+    let cancelled = false
+
+    const tryPraveshSso = async (): Promise<boolean> => {
       try {
-        const payload = JSON.parse(atob(token.split('.')[1]));
-        const currentTime = Math.floor(Date.now() / 1000);
-        
-        if (payload.exp > currentTime) {
-          const parsed = JSON.parse(userData) as User;
-          const roleFromToken = payload.role;
-          const role = typeof roleFromToken === 'string' && ['candidate', 'recruiter', 'client'].includes(roleFromToken)
-            ? roleFromToken
-            : (parsed.role || authStorage.getItem('user_role') || 'candidate');
-          const userWithRole = { ...parsed, role };
-          setUser(userWithRole);
-          authStorage.setItem('user_role', role);
-        } else {
-          clearAuthStorage();
+        const { API_BASE_URL } = await import('../services/api')
+        const response = await fetch(`${API_BASE_URL}/api/v1/pravesh/exchange`, {
+          method: 'POST',
+          credentials: 'include',
+        })
+        if (!response.ok) return false
+        const data = await response.json()
+        if (!data?.success || !data.token || !data.user) return false
+        if (cancelled) return false
+
+        const role = ['candidate', 'recruiter', 'client'].includes(data.user.role)
+          ? data.user.role
+          : 'candidate'
+        const ssoUser: User = {
+          id: data.user.id,
+          email: data.user.email || '',
+          name: data.user.name || '',
+          role,
         }
+
+        authStorage.setItem('auth_token', data.token)
+        authStorage.setItem('user_data', JSON.stringify(ssoUser))
+        authStorage.setItem('user_role', role)
+        authStorage.setItem('user_email', ssoUser.email)
+        authStorage.setItem('user_name', ssoUser.name || '')
+        authStorage.setItem('isAuthenticated', 'true')
+        if (ssoUser.id) {
+          authStorage.setItem('candidate_id', ssoUser.id)
+          authStorage.setItem('backend_candidate_id', ssoUser.id)
+        }
+        setUser(ssoUser)
+        console.log('✅ AuthContext: Pravesh SSO auto-login as', role)
+        return true
       } catch (error) {
-        console.error('Error parsing token or user data:', error);
-        clearAuthStorage();
+        // No Pravesh session (or bridge offline) — fall back to the sign-in page
+        console.log('AuthContext: no Pravesh SSO session, opening as guest')
+        return false
       }
     }
-    
-    setLoading(false);
+
+    const createGuestSession = async (): Promise<void> => {
+      // No local session and no Pravesh cookie — open the UI as a demo guest.
+      try {
+        const { API_BASE_URL } = await import('../services/api')
+        const response = await fetch(`${API_BASE_URL}/v1/auth/guest-session`, { method: 'POST' })
+        if (response.ok) {
+          const data = await response.json()
+          if (cancelled) return
+          if (data?.success && data.token && data.user) {
+            const guest: User = { ...data.user, isGuest: true }
+            authStorage.setItem('auth_token', data.token)
+            authStorage.setItem('user_data', JSON.stringify(guest))
+            authStorage.setItem('user_role', guest.role || 'candidate')
+            authStorage.setItem('user_email', '')
+            authStorage.setItem('user_name', guest.name || 'Guest User')
+            authStorage.setItem('isAuthenticated', 'true')
+            authStorage.setItem('candidate_id', guest.id)
+            authStorage.setItem('backend_candidate_id', guest.id)
+            setUser(guest)
+            console.log('✅ AuthContext: guest demo session started')
+            return
+          }
+        }
+      } catch (error) {
+        console.log('AuthContext: guest session endpoint unavailable, using local guest')
+      }
+      if (cancelled) return
+      const guest: User = { id: 'guest:demo', email: '', name: 'Guest User', role: 'candidate', isGuest: true }
+      authStorage.setItem('user_data', JSON.stringify(guest))
+      authStorage.setItem('user_role', 'candidate')
+      authStorage.setItem('user_email', '')
+      authStorage.setItem('user_name', 'Guest User')
+      authStorage.setItem('isAuthenticated', 'true')
+      setUser(guest)
+    }
+
+    const initAuth = async () => {
+      const token = authStorage.getItem('auth_token')
+      const userData = authStorage.getItem('user_data')
+      let restored = false
+
+      if (token && userData) {
+        try {
+          const payload = JSON.parse(atob(token.split('.')[1]))
+          const currentTime = Math.floor(Date.now() / 1000)
+
+          if (payload.exp > currentTime) {
+            const parsed = JSON.parse(userData) as User
+            const roleFromToken = payload.role
+            const role = typeof roleFromToken === 'string' && ['candidate', 'recruiter', 'client'].includes(roleFromToken)
+              ? roleFromToken
+              : (parsed.role || authStorage.getItem('user_role') || 'candidate')
+            const userWithRole = { ...parsed, role }
+            setUser(userWithRole)
+            authStorage.setItem('user_role', role)
+            restored = true
+          } else {
+            clearAuthStorage()
+          }
+        } catch (error) {
+          console.error('Error parsing token or user data:', error)
+          clearAuthStorage()
+        }
+      }
+
+      if (!restored && !cancelled) {
+        const ssoOk = await tryPraveshSso()
+        if (!ssoOk && !cancelled) {
+          await createGuestSession()
+        }
+      }
+      if (!cancelled) {
+        setLoading(false)
+      }
+    }
+
+    initAuth()
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   const handleSignIn = async (email: string, password: string) => {
@@ -256,6 +358,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const handleSignOut = async () => {
+    // End the Pravesh SSO session too: the httpOnly blackhole_token cookie
+    // outlives local storage, and initAuth() would auto-login again on reload.
+    try {
+      const { API_BASE_URL } = await import('../services/api')
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), 3000)
+      try {
+        await fetch(`${API_BASE_URL}/api/v1/pravesh/logout`, {
+          method: 'POST',
+          credentials: 'include',
+          signal: controller.signal,
+        })
+      } finally {
+        clearTimeout(timer)
+      }
+    } catch {
+      // Bridge offline — local sign-out still proceeds
+    }
     clearAuthStorage();
     const authService = (await import('../services/authService')).default;
     authService.removeAuthToken();
@@ -271,8 +391,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       loading,
       signIn: handleSignIn,
       signUp: handleSignUp,
-      signOut: handleSignOut,
-      userRole,
+        signOut: handleSignOut,
+        isGuest: user?.isGuest === true,
+        userRole,
       userName,
     }}>
       {children}

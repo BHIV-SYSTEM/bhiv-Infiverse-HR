@@ -4,7 +4,7 @@ import { Toaster } from 'react-hot-toast'
 import SplashScreen from './components/SplashScreen'
 import AuthPage from './pages/auth/AuthPage'
 import { ThemeProvider } from './context/ThemeContext'
-import { AuthProvider } from './context/AuthContext'
+import { AuthProvider, useAuth } from './context/AuthContext'
 import ProtectedRoute, { PublicRoute } from './components/ProtectedRoute'
 
 // Layouts
@@ -21,6 +21,7 @@ import CandidateInterviews from './pages/candidate/Interviews'
 import CandidateTasks from './pages/candidate/Tasks'
 import CandidateTaskDetail from './pages/candidate/TaskDetail'
 import CandidateFeedback from './pages/candidate/Feedback'
+import CvBuilder from './pages/candidate/CvBuilder'
 
 // Recruiter Pages
 import RecruiterDashboard from './pages/recruiter/Dashboard'
@@ -45,6 +46,31 @@ import MatchResults from './pages/client/MatchResults'
 import ClientReports from './pages/client/ClientReports'
 import LiveRecruiterMonitoring from './pages/client/LiveRecruiterMonitoring'
 import ControlCenter from './pages/control/ControlCenter'
+
+function HomeRedirect() {
+  const { user, userRole, loading } = useAuth()
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+        <div className="w-12 h-12 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    )
+  }
+
+  const roleRedirects: Record<string, string> = {
+    candidate: '/candidate/dashboard',
+    recruiter: '/recruiter',
+    client: '/client',
+    admin: '/control',
+  }
+
+  if (user) {
+    const role = userRole || user.role || 'candidate'
+    return <Navigate to={roleRedirects[role] || '/candidate/dashboard'} replace />
+  }
+  return <Navigate to="/auth" replace />
+}
 
 function App() {
   const [showSplash, setShowSplash] = useState(true)
@@ -71,7 +97,7 @@ function App() {
           <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
             <Routes>
               {/* Public Routes */}
-              <Route path="/" element={<Navigate to="/auth" replace />} />
+              <Route path="/" element={<HomeRedirect />} />
               <Route path="/auth" element={<PublicRoute><AuthPage /></PublicRoute>} />
               <Route
                 path="/control"
@@ -97,6 +123,7 @@ function App() {
                 <Route path="tasks" element={<CandidateTasks />} />
                 <Route path="tasks/:taskId" element={<CandidateTaskDetail />} />
                 <Route path="feedback" element={<CandidateFeedback />} />
+                <Route path="cv-builder" element={<CvBuilder />} />
               </Route>
 
               {/* Recruiter Routes - Protected for 'recruiter' role only */}
@@ -122,6 +149,7 @@ function App() {
                 <Route path="batch-operations" element={<BatchOperations />} />
                 <Route path="automation" element={<AutomationPanel />} />
                 <Route path="reports" element={<ExportReports />} />
+                <Route path="cv-builder" element={<CvBuilder />} />
               </Route>
 
               {/* Client Routes - Protected for 'client' role only */}
@@ -139,8 +167,8 @@ function App() {
                 <Route path="reports" element={<ClientReports />} />
               </Route>
 
-              {/* Fallback - redirect to auth */}
-              <Route path="*" element={<Navigate to="/auth" replace />} />
+              {/* Fallback - re-evaluate via HomeRedirect */}
+              <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
             <Toaster
               position="top-right"

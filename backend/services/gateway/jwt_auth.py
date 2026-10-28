@@ -6,7 +6,7 @@ Validates JWT tokens from frontend
 import os
 import jwt
 import httpx
-from fastapi import HTTPException, Security
+from fastapi import HTTPException, Security, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional, Dict, Any
 from functools import lru_cache
@@ -144,15 +144,36 @@ def get_api_key(credentials: HTTPAuthorizationCredentials = Security(security)):
     return credentials.credentials
 
 
-def get_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
+def get_auth(
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    request: Request = None,
+):
     """
-    Unified authentication: API key OR JWT token
+    Unified authentication: API key OR JWT token OR Pravesh SSO cookie
     - API keys: For service-to-service communication
     - JWT: For authenticated users from frontend
     Supports both client JWT tokens (JWT_SECRET_KEY) and candidate JWT tokens (CANDIDATE_JWT_SECRET_KEY)
     See ENVIRONMENT_VARIABLES.md for standardized variable names.
+
+    Read-only Pravesh bridge: when no Authorization header is present, the
+    Pravesh (blackhole_auth) cookie/header is accepted if it verifies and the
+    app slug is authorised. The identity stays namespaced (``pravesh:<id>``)
+    so no local account is ever adopted or merged. Falls back to the normal
+    401 whenever the bridge is disabled or the token is absent/invalid.
     """
     if not credentials:
+        # --- Pravesh read-only bridge (cookie/header, no Authorization header) ---
+        try:
+            from pravesh_bridge import pravesh_auth_from_request
+
+            pravesh_auth = pravesh_auth_from_request(request)
+        except Exception as _pravesh_exc:  # bridge must never break normal auth
+            logger.warning(f"[PRAVESH] Bridge error (ignored): {_pravesh_exc}")
+            pravesh_auth = None
+        if pravesh_auth:
+            logger.info(f"[AUTH] Pravesh SSO identity accepted: {pravesh_auth['user_id']}")
+            return pravesh_auth
+
         logger.warning("No credentials provided in Authorization header")
         raise HTTPException(status_code=401, detail="Authentication required")
     
@@ -223,9 +244,12 @@ def get_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
     raise HTTPException(status_code=401, detail="Invalid authentication token")
 
 
-def auth_dependency(credentials: HTTPAuthorizationCredentials = Security(security)):
+def auth_dependency(
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    request: Request = None,
+):
     """Standard auth dependency for all services"""
-    return get_auth(credentials)
+    return get_auth(credentials, request)
 
 
 def require_role(*allowed_roles: str):
@@ -245,9 +269,12 @@ def require_role(*allowed_roles: str):
 
 
 # Role-specific dependencies
-def get_candidate_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
+def get_candidate_auth(
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    request: Request = None,
+):
     """Authentication for candidate-only endpoints"""
-    auth = get_auth(credentials)
+    auth = get_auth(credentials, request)
     if auth.get("type") == "api_key":
         return auth  # API keys have full access
     if auth.get("role") != "candidate":
@@ -255,9 +282,12 @@ def get_candidate_auth(credentials: HTTPAuthorizationCredentials = Security(secu
     return auth
 
 
-def get_recruiter_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
+def get_recruiter_auth(
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    request: Request = None,
+):
     """Authentication for recruiter-only endpoints"""
-    auth = get_auth(credentials)
+    auth = get_auth(credentials, request)
     if auth.get("type") == "api_key":
         return auth
     if auth.get("role") not in ["recruiter", "admin"]:
@@ -265,9 +295,12 @@ def get_recruiter_auth(credentials: HTTPAuthorizationCredentials = Security(secu
     return auth
 
 
-def get_client_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
+def get_client_auth(
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    request: Request = None,
+):
     """Authentication for client-only endpoints"""
-    auth = get_auth(credentials)
+    auth = get_auth(credentials, request)
     if auth.get("type") == "api_key":
         return auth
     if auth.get("role") not in ["client", "admin"]:
@@ -275,9 +308,12 @@ def get_client_auth(credentials: HTTPAuthorizationCredentials = Security(securit
     return auth
 
 
-def get_admin_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
+def get_admin_auth(
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    request: Request = None,
+):
     """Authentication for admin-only endpoints"""
-    auth = get_auth(credentials)
+    auth = get_auth(credentials, request)
     if auth.get("type") == "api_key":
         return auth
     if auth.get("role") != "admin":
@@ -286,12 +322,23 @@ def get_admin_auth(credentials: HTTPAuthorizationCredentials = Security(security
 
 
 # Optional auth (for public endpoints that can optionally use auth)
-def get_optional_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
+def get_optional_auth(
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    request: Request = None,
+):
     """Optional authentication - returns None if not authenticated"""
     if not credentials:
+        try:
+            from pravesh_bridge import pravesh_auth_from_request
+
+            pravesh_auth = pravesh_auth_from_request(request)
+            if pravesh_auth:
+                return pravesh_auth
+        except Exception:
+            pass
         return None
-    
+
     try:
-        return get_auth(credentials)
+        return get_auth(credentials, request)
     except HTTPException:
         return None

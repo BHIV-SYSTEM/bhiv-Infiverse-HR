@@ -15,6 +15,10 @@ _mongo_client: Optional[AsyncIOMotorClient] = None
 _mongo_db: Optional[AsyncIOMotorDatabase] = None
 
 
+class DatabaseNotConfiguredError(ValueError):
+    """Raised when DATABASE_URL/MONGODB_URI is not set (no-database dev mode)."""
+
+
 def get_mongo_client() -> AsyncIOMotorClient:
     """
     Get or create MongoDB client (async)
@@ -26,7 +30,7 @@ def get_mongo_client() -> AsyncIOMotorClient:
         mongodb_uri = os.getenv("DATABASE_URL") or os.getenv("MONGODB_URI")
         
         if not mongodb_uri:
-            raise ValueError(
+            raise DatabaseNotConfiguredError(
                 "DATABASE_URL or MONGODB_URI environment variable is required"
             )
         

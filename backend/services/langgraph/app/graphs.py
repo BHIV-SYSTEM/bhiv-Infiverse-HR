@@ -63,8 +63,15 @@ def create_application_workflow():
         
         # Setup MongoDB checkpointer for state persistence (migrated from PostgresSaver)
         try:
-            checkpointer = MongoDBSaver.from_conn_string(settings.database_url)
-            logger.info("✅ MongoDB checkpointer configured")
+            if settings.database_url:
+                checkpointer = MongoDBSaver.from_conn_string(settings.database_url)
+                logger.info("✅ MongoDB checkpointer configured")
+            else:
+                checkpointer = None
+                logger.info(
+                    "MongoDB checkpointer skipped — DATABASE_URL not set "
+                    "(workflow state stays in-memory). Set it in backend/.env to persist."
+                )
         except Exception as e:
             logger.warning(f"⚠️ MongoDB checkpointer failed: {e}")
             checkpointer = None

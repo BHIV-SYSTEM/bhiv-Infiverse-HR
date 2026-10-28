@@ -9,9 +9,17 @@ PYTHON_VERSION = os.getenv("PYTHON_VERSION", "3.12.7")
 OBSERVABILITY_ENABLED = os.getenv("OBSERVABILITY_ENABLED", "true").lower() == "true"
 
 # Database Configuration
-DATABASE_URL = os.getenv("DATABASE_URL")
+# Required in production. Outside production it is optional: the agent's
+# semantic engine logs the missing DB and continues with its fallbacks, so a
+# missing URI must not abort startup.
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("MONGODB_URI")
 if not DATABASE_URL:
-    raise ValueError("DATABASE_URL environment variable is required")
+    if ENVIRONMENT == "production":
+        raise ValueError("DATABASE_URL environment variable is required in production")
+    logging.getLogger(__name__).warning(
+        "DATABASE_URL/MONGODB_URI not set — running without MongoDB "
+        "(in-memory fallbacks). Set it in backend/.env to enable persistence."
+    )
 
 # Authentication Configuration - Standardized variable name (see ENVIRONMENT_VARIABLES.md)
 API_KEY_SECRET = os.getenv("API_KEY_SECRET")
@@ -52,10 +60,12 @@ def setup_logging():
 def validate_config():
     """Validate all required configuration is present"""
     required_vars = [
-        "DATABASE_URL",
         "API_KEY_SECRET", 
         "CANDIDATE_JWT_SECRET_KEY"
     ]
+    # MongoDB is mandatory only in production (see DATABASE_URL above).
+    if ENVIRONMENT == "production":
+        required_vars.insert(0, "DATABASE_URL")
     
     missing_vars = []
     for var in required_vars:

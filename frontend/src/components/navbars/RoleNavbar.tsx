@@ -54,7 +54,7 @@ const roleConfig = {
 export default function RoleNavbar({ role }: RoleNavbarProps) {
   const { theme, toggleTheme } = useTheme()
   const { isCollapsed, toggleSidebar, toggleMobile } = useSidebar()
-  const { signOut, userName } = useAuth()
+  const { signOut, userName, isGuest } = useAuth()
   const navigate = useNavigate()
   const config = roleConfig[role]
   const [notificationsOpen, setNotificationsOpen] = useState(false)
@@ -299,16 +299,29 @@ export default function RoleNavbar({ role }: RoleNavbarProps) {
                 </p>
               </div>
             </button>
-            {/* Logout Button - Hidden on mobile, shown on tablet+ */}
-            <button
-              onClick={handleLogout}
-              className="hidden sm:block p-2 hover:bg-gray-100 dark:hover:bg-slate-800 rounded-lg transition-colors"
-              title="Logout"
-            >
-              <svg className="w-5 h-5 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-              </svg>
-            </button>
+            {/* Sign in (guest) / Logout (signed-in) - Hidden on mobile, shown on tablet+ */}
+            {isGuest ? (
+              <button
+                onClick={() => navigate('/auth')}
+                className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-500 hover:bg-blue-600 text-white text-sm font-medium transition-colors"
+                title="Sign in"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7" />
+                </svg>
+                Sign in
+              </button>
+            ) : (
+              <button
+                onClick={handleLogout}
+                className="hidden sm:block p-2 hover:bg-gray-100 dark:hover:bg-slate-800 rounded-lg transition-colors"
+                title="Logout"
+              >
+                <svg className="w-5 h-5 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                </svg>
+              </button>
+            )}
           </div>
         </div>
       </div>

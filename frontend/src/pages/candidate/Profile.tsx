@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import toast from 'react-hot-toast'
-import { useLocation } from 'react-router-dom'
+import { useLocation, Link } from 'react-router-dom'
 import { updateCandidateProfile, getCandidateProfile } from '../../services/api'
 import FormInput from '../../components/FormInput'
 import SalaryRangeInput from '../../components/SalaryRangeInput'
@@ -285,6 +285,16 @@ export default function CandidateProfile() {
             <h1 className="page-title">My Profile</h1>
             <p className="page-subtitle">Your professional information</p>
           </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <Link
+              to="/candidate/cv-builder"
+              className="border border-blue-500/40 text-blue-600 dark:text-blue-300 px-5 py-2.5 rounded-xl font-semibold hover:bg-blue-50 dark:hover:bg-blue-500/10 transition-all duration-300 flex items-center gap-2"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m-6-8h6M9 4h6a2 2 0 012 2v12a2 2 0 01-2 2H9a2 2 0 01-2-2V6a2 2 0 012-2z" />
+              </svg>
+              Build My CV
+            </Link>
           {!isEditing && (
             <button
               onClick={() => setIsEditing(true)}
@@ -296,6 +306,7 @@ export default function CandidateProfile() {
               Edit Profile
             </button>
           )}
+          </div>
         </div>
       </div>
 
