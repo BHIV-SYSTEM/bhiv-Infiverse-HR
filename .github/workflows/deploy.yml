@@ -91,9 +91,28 @@ jobs:
 
       - name: Build and push hr-frontend image
         run: |
+          # Priority 1: Direct secrets
+          VITE_PRAVESH_URL="${{ secrets.VITE_PRAVESH_URL }}"
+          VITE_API_BASE_URL="${{ secrets.VITE_API_BASE_URL }}"
+          VITE_AGENT_SERVICE_URL="${{ secrets.VITE_AGENT_SERVICE_URL }}"
+          VITE_LANGGRAPH_SERVICE_URL="${{ secrets.VITE_LANGGRAPH_SERVICE_URL }}"
+
+          # Priority 2: Extract from FRONTEND_ENV_FILE secret if not set directly
+          FRONTEND_SECRET="${{ secrets.FRONTEND_ENV_FILE }}"
+          if [ -n "$FRONTEND_SECRET" ]; then
+            [ -z "$VITE_PRAVESH_URL" ] && VITE_PRAVESH_URL=$(echo "$FRONTEND_SECRET" | grep '^VITE_PRAVESH_URL=' | cut -d '=' -f2- || true)
+            [ -z "$VITE_API_BASE_URL" ] && VITE_API_BASE_URL=$(echo "$FRONTEND_SECRET" | grep '^VITE_API_BASE_URL=' | cut -d '=' -f2- || true)
+            [ -z "$VITE_AGENT_SERVICE_URL" ] && VITE_AGENT_SERVICE_URL=$(echo "$FRONTEND_SECRET" | grep '^VITE_AGENT_SERVICE_URL=' | cut -d '=' -f2- || true)
+            [ -z "$VITE_LANGGRAPH_SERVICE_URL" ] && VITE_LANGGRAPH_SERVICE_URL=$(echo "$FRONTEND_SECRET" | grep '^VITE_LANGGRAPH_SERVICE_URL=' | cut -d '=' -f2- || true)
+          fi
+
           docker buildx build --push \
             --tag bhiv/hr-frontend:${{ steps.vars.outputs.sha_short }} \
             --tag bhiv/hr-frontend:latest \
+            --build-arg VITE_PRAVESH_URL="$VITE_PRAVESH_URL" \
+            --build-arg VITE_API_BASE_URL="$VITE_API_BASE_URL" \
+            --build-arg VITE_AGENT_SERVICE_URL="$VITE_AGENT_SERVICE_URL" \
+            --build-arg VITE_LANGGRAPH_SERVICE_URL="$VITE_LANGGRAPH_SERVICE_URL" \
             -f frontend/Dockerfile ./frontend
 
   deploy:

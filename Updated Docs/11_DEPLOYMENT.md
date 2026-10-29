@@ -113,6 +113,7 @@ immutable Cache-Control on `/assets/*`.
 | `VITE_LANGGRAPH_SERVICE_URL` | `https://sampada.blackholeinfiverse.com/langgraph` |
 | `VITE_ENABLE_CONTROL_CENTER` | `true` |
 | `VITE_ENABLE_GOVERNANCE` | `true` |
+| `VITE_PRAVESH_URL` | `https://pravesh.blackholeinfiverse.com` |
 | `VITE_API_KEY` | Must match Render/VM `API_KEY_SECRET` |
 
 Troubleshooting: SPA 404-on-refresh → ensure the rewrite rule is applied; env changes require a new
