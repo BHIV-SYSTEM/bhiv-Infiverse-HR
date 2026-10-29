@@ -29,6 +29,7 @@ from app.identity.models import (  # noqa: E402
     INSTITUTE_CODES,
     AbhiruchiIntakeRequest,
     EnrolmentPublishRequest,
+    IdentityRecord,
     normalise_institute_code,
 )
 from app.identity.service import InMemoryIdentityStore  # noqa: E402
@@ -171,6 +172,104 @@ async def test_different_institute_same_email_not_flagged(store):
         intake(source_reference="ABH-201", institute_code="VJTI"), store
     )
     assert other["record"].possible_duplicate_of == []
+
+
+# ---------------------------------------------------------------------------
+# Conflicting replays — nothing is silently discarded
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_replay_with_conflicting_email_warns_and_keeps_original(store):
+    await service.process_intake(intake(source_reference="ABH-300"), store)
+    result = await service.process_intake(
+        intake(source_reference="ABH-300", email="changed@example.com"), store
+    )
+    assert result["status"] == "reused"
+    assert result["record"].email == "student@example.com"  # first value wins
+    assert any("email differs" in w for w in result["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_replay_with_conflicting_institute_warns_and_keeps_original(store):
+    await service.process_intake(intake(source_reference="ABH-301"), store)
+    result = await service.process_intake(
+        intake(source_reference="ABH-301", institute_code="VJTI"), store
+    )
+    assert result["status"] == "reused"
+    assert result["record"].institute_code == "MSSU"  # first value wins
+    assert any("institute_code" in w for w in result["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_replay_with_conflicting_cohort_warns_and_keeps_original(store):
+    await service.process_intake(intake(source_reference="ABH-302"), store)
+    result = await service.process_intake(
+        intake(source_reference="ABH-302", cohort_id="MSSU-2026-B9"), store
+    )
+    assert result["status"] == "reused"
+    assert result["record"].cohort_id == "MSSU-2026-B1"  # first value wins
+    assert any("cohort_id" in w for w in result["warnings"])
+
+
+# ---------------------------------------------------------------------------
+# Concurrency — racing intakes converge on one record (unique-index behaviour)
+# ---------------------------------------------------------------------------
+
+
+class RacingStore(InMemoryIdentityStore):
+    """Simulates the Mongo unique-index race: the concurrent writer's record
+    is invisible to our first lookup but present at insert time, so our save
+    hits StoreConflictError."""
+
+    def __init__(self):
+        super().__init__()
+        self._miss_once = True
+
+    async def get_by_source_ref(self, source_system, source_reference):
+        if self._miss_once:
+            self._miss_once = False
+            return None  # racing writer has not committed yet
+        return await super().get_by_source_ref(source_system, source_reference)
+
+    async def save_record(self, record):
+        for other in self._records.values():
+            if (
+                other.source_system == record.source_system
+                and record.source_reference in other.source_references
+                and other.sampada_local_id != record.sampada_local_id
+            ):
+                raise service.StoreConflictError(
+                    "unique index (source_system, source_references) violated"
+                )
+        return await super().save_record(record)
+
+
+@pytest.mark.asyncio
+async def test_racing_duplicate_intake_converges_on_winner():
+    racing = RacingStore()
+
+    # The concurrent writer's record lands first (the "winner").
+    winner = IdentityRecord(
+        sampada_local_id="sd_winner000000001",
+        institute_code="MSSU",
+        source_system="abhiruchi",
+        source_reference="ABH-401",
+        email="student@example.com",
+        source_references=["ABH-401"],
+    )
+    await racing.save_record(winner)
+    assert winner.sampada_local_id in {
+        r.sampada_local_id for r in await racing.all_records()
+    }
+
+    # Our intake misses the winner on lookup, tries to create a second record,
+    # is rejected by the unique index — it must converge, not duplicate.
+    result = await service.process_intake(intake(source_reference="ABH-401"), racing)
+    assert result["status"] == "reused"
+    assert result["record"].sampada_local_id == "sd_winner000000001"
+    assert any("concurrent duplicate intake" in w for w in result["warnings"])
+    assert len(await racing.all_records()) == 1  # still exactly one candidate
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,12 @@ import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
+try:  # pragma: no cover - exercised only in Mongo mode
+    from pymongo.errors import DuplicateKeyError
+except ImportError:  # pragma: no cover - pymongo always present with motor
+    class DuplicateKeyError(Exception):  # type: ignore[no-redef]
+        """Stand-in so a Mongo-less environment still imports cleanly."""
+
 from .models import (
     CANONICAL_ID_UNKNOWN,
     CANONICAL_ID_VERIFIED,
@@ -36,6 +42,16 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class StoreConflictError(Exception):
+    """A concurrent writer created the same identity first.
+
+    Raised when a unique index rejects an insert — i.e. two racing intakes
+    for the same ``(source_system, source_reference)``. ``process_intake``
+    catches this and converges on the winner's record, so a racing retry can
+    never leave two candidates for one source reference.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -148,19 +164,29 @@ class MongoIdentityStore:
 
     async def save_record(self, record: IdentityRecord) -> IdentityRecord:
         record.updated_at = utc_now_iso()
-        await self._db[self.RECORDS].update_one(
-            {"sampada_local_id": record.sampada_local_id},
-            {"$set": record.model_dump()},
-            upsert=True,
-        )
+        try:
+            await self._db[self.RECORDS].update_one(
+                {"sampada_local_id": record.sampada_local_id},
+                {"$set": record.model_dump()},
+                upsert=True,
+            )
+        except DuplicateKeyError as exc:
+            # Unique index (sampada_local_id / source ref / canonical id)
+            # rejected the insert — a concurrent writer won the race.
+            raise StoreConflictError(str(exc)) from exc
         return record
 
     async def save_enrolment(self, key: str, payload: Dict[str, Any]) -> None:
-        await self._db[self.ENROLMENTS].update_one(
-            {"idempotency_key": key},
-            {"$set": {"idempotency_key": key, "payload": payload, "saved_at": utc_now_iso()}},
-            upsert=True,
-        )
+        try:
+            await self._db[self.ENROLMENTS].update_one(
+                {"idempotency_key": key},
+                {"$set": {"idempotency_key": key, "payload": payload, "saved_at": utc_now_iso()}},
+                upsert=True,
+            )
+        except DuplicateKeyError:
+            # Another writer stored the same key first — first envelope wins,
+            # mirroring HackaVerse's ingest semantics. Never overwrite it.
+            logger.info("[IDENTITY] concurrent enrolment write for %s — keeping the stored envelope", key)
 
     async def get_enrolment(self, key: str) -> Optional[Dict[str, Any]]:
         doc = await self._db[self.ENROLMENTS].find_one({"idempotency_key": key})
@@ -168,6 +194,52 @@ class MongoIdentityStore:
 
 
 _MEMORY_STORE = InMemoryIdentityStore()
+
+_MONGO_INDEXES_DONE = False
+_MONGO_INDEX_WARNED = False
+
+
+async def _ensure_mongo_indexes(db) -> None:
+    """Unique indexes that make idempotency real under concurrency.
+
+    Without them, find-then-save races can mint two records for one source
+    reference and upserts on ``idempotency_key`` can duplicate. Best-effort:
+    if pre-existing duplicate documents block creation, the failure is logged
+    once (they must be reconciled before the index can be built).
+    """
+    global _MONGO_INDEXES_DONE, _MONGO_INDEX_WARNED
+    if _MONGO_INDEXES_DONE:
+        return
+    _MONGO_INDEXES_DONE = True  # attempt once per process
+    plans = [
+        (MongoIdentityStore.RECORDS,
+         [("sampada_local_id", 1)],
+         {"unique": True, "name": "sampada_local_id_unique"}),
+        # Multikey: the same source reference may appear in only one record,
+        # which is exactly the replay/idempotency guarantee.
+        (MongoIdentityStore.RECORDS,
+         [("source_system", 1), ("source_references", 1)],
+         {"unique": True, "name": "source_ref_unique"}),
+        # Canonical ids are globally unique when present (nulls exempted).
+        (MongoIdentityStore.RECORDS,
+         [("canonical_candidate_id", 1)],
+         {"unique": True, "name": "canonical_id_unique",
+          "partialFilterExpression": {"canonical_candidate_id": {"$type": "string"}}}),
+        (MongoIdentityStore.ENROLMENTS,
+         [("idempotency_key", 1)],
+         {"unique": True, "name": "idempotency_key_unique"}),
+    ]
+    for collection, keys, opts in plans:
+        try:
+            await db[collection].create_index(keys, **opts)
+        except Exception as exc:
+            if not _MONGO_INDEX_WARNED:
+                _MONGO_INDEX_WARNED = True
+                logger.warning(
+                    "[IDENTITY] could not ensure unique index on %s: %s "
+                    "(pre-existing duplicates must be reconciled)",
+                    collection, exc,
+                )
 
 
 async def get_identity_store():
@@ -177,6 +249,7 @@ async def get_identity_store():
 
         db = await get_mongo_db()
         if db is not None:
+            await _ensure_mongo_indexes(db)
             return MongoIdentityStore(db)
     except Exception as exc:  # pragma: no cover - depends on runtime env
         logger.info("[IDENTITY] Mongo unavailable, using memory store: %s", exc)
@@ -190,6 +263,67 @@ async def get_identity_store():
 
 def new_local_id() -> str:
     return f"sd_{uuid.uuid4().hex[:16]}"
+
+
+def _merge_replay(
+    req: AbhiruchiIntakeRequest,
+    record: IdentityRecord,
+    institute: str,
+    warnings: List[str],
+) -> None:
+    """Apply a replayed intake onto an existing record.
+
+    Fills only what is missing and never overwrites a persisted value. Any
+    conflicting supplied value is reported as a warning — nothing is
+    silently discarded.
+    """
+    if req.source_reference not in record.source_references:
+        record.source_references.append(req.source_reference)
+
+    # Fill previously-unknown attributes only; never overwrite a VERIFIED
+    # canonical id with a different value.
+    if req.canonical_candidate_id and not record.canonical_candidate_id:
+        record.canonical_candidate_id = req.canonical_candidate_id
+        record.canonical_id_status = CANONICAL_ID_VERIFIED
+    elif (
+        req.canonical_candidate_id
+        and record.canonical_candidate_id
+        and req.canonical_candidate_id != record.canonical_candidate_id
+    ):
+        warnings.append(
+            "canonical_candidate_id mismatch with existing record — kept the "
+            "existing one; conflicting value not applied"
+        )
+    if req.email:
+        if not record.email:
+            record.email = req.email
+        elif req.email.strip().lower() != record.email.strip().lower():
+            warnings.append(
+                "email differs from the persisted record — kept the existing "
+                "value; conflicting value not applied"
+            )
+    if institute:
+        if not record.institute_code:
+            record.institute_code = institute
+        elif institute != record.institute_code:
+            warnings.append(
+                f"institute_code '{institute}' differs from persisted "
+                f"'{record.institute_code}' — kept the existing value; "
+                "conflicting value not applied"
+            )
+    if req.cohort_id:
+        if not record.cohort_id:
+            record.cohort_id = req.cohort_id
+        elif req.cohort_id != record.cohort_id:
+            warnings.append(
+                f"cohort_id '{req.cohort_id}' differs from persisted "
+                f"'{record.cohort_id}' — kept the existing value; "
+                "conflicting value not applied"
+            )
+    if record.lifecycle_status is None and req.lifecycle_status is not None:
+        record.lifecycle_status = req.lifecycle_status  # passthrough only
+    if req.trace_id and not record.trace_id:
+        record.trace_id = req.trace_id
 
 
 async def process_intake(
@@ -216,32 +350,7 @@ async def process_intake(
 
     if record is not None:
         status = "reused"
-        if req.source_reference not in record.source_references:
-            record.source_references.append(req.source_reference)
-        # Fill previously-unknown attributes only; never overwrite a VERIFIED
-        # canonical id with a different value.
-        if req.canonical_candidate_id and not record.canonical_candidate_id:
-            record.canonical_candidate_id = req.canonical_candidate_id
-            record.canonical_id_status = CANONICAL_ID_VERIFIED
-        elif (
-            req.canonical_candidate_id
-            and record.canonical_candidate_id
-            and req.canonical_candidate_id != record.canonical_candidate_id
-        ):
-            warnings.append(
-                "canonical_candidate_id mismatch with existing record — kept the "
-                "existing one; conflicting value not applied"
-            )
-        if not record.email and req.email:
-            record.email = req.email
-        if not record.institute_code:
-            record.institute_code = institute
-        if not record.cohort_id and req.cohort_id:
-            record.cohort_id = req.cohort_id
-        if record.lifecycle_status is None and req.lifecycle_status is not None:
-            record.lifecycle_status = req.lifecycle_status  # passthrough only
-        if req.trace_id and not record.trace_id:
-            record.trace_id = req.trace_id
+        _merge_replay(req, record, institute, warnings)
     else:
         record = IdentityRecord(
             sampada_local_id=new_local_id(),
@@ -280,7 +389,33 @@ async def process_intake(
                 "institute) — flagged for review, NOT merged"
             )
 
-    await store.save_record(record)
+    try:
+        await store.save_record(record)
+    except StoreConflictError:
+        # A concurrent identical intake beat us to the insert (unique index
+        # rejected ours). Converge on the winner instead of leaving two
+        # records for one source reference.
+        winner = await store.get_by_source_ref(
+            req.source_system, req.source_reference
+        )
+        if winner is None and req.canonical_candidate_id:
+            winner = await store.get_by_canonical_id(req.canonical_candidate_id)
+        if winner is None:
+            raise
+        logger.info(
+            "[IDENTITY] racing intake for %s/%s — converged on %s",
+            req.source_system,
+            req.source_reference,
+            winner.sampada_local_id,
+        )
+        status = "reused"
+        warnings.append(
+            "concurrent duplicate intake detected — converged on the existing "
+            "record; no duplicate candidate created"
+        )
+        _merge_replay(req, winner, institute, warnings)
+        record = winner
+        await store.save_record(record)
 
     return {
         "status": status,
