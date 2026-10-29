@@ -181,6 +181,9 @@ def identity_from_request(request) -> Optional[Dict[str, Any]]:
     roles = [str(r) for r in (payload.get("roles") or [])]
     return {
         "user_id": str(payload.get("user_id")),
+        "candidate_id": payload.get("candidate_id"),
+        "institute_code": payload.get("institute_code"),
+        "cohort_id": payload.get("cohort_id"),
         "email": payload.get("email"),
         "tenant_id": payload.get("tenant_id") or "tenant_default",
         "roles": roles,

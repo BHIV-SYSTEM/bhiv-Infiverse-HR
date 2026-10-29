@@ -92,11 +92,25 @@ async def exchange_session(request: Request):
     role = _sso_role(identity.get("roles"))
     local_user_id = f"pravesh:{identity['user_id']}"
     email = identity.get("email") or ""
+
+    # Canonical candidate ID resolution
+    candidate_id = identity.get("candidate_id")
+    if not candidate_id and email:
+        try:
+            from app.identity import service as id_service
+            store = await id_service.get_identity_store()
+            matches = await store.find_by_email_institute(email, None)
+            if matches and matches[0].canonical_candidate_id:
+                candidate_id = matches[0].canonical_candidate_id
+        except Exception:
+            pass
+
+    resolved_candidate_id = candidate_id or local_user_id
     now = int(time.time())
     payload = {
         "sub": local_user_id,
         "user_id": local_user_id,
-        "candidate_id": local_user_id,
+        "candidate_id": resolved_candidate_id,
         "email": email,
         "name": email.split("@")[0] if email else identity["user_id"],
         "role": role,
@@ -112,10 +126,14 @@ async def exchange_session(request: Request):
         "provider": "pravesh",
         "token": token,
         "user": {
-            "id": local_user_id,
+            "id": resolved_candidate_id,
+            "candidate_id": resolved_candidate_id,
+            "local_user_id": local_user_id,
             "email": email,
             "name": payload["name"],
             "role": role,
+            "institute_code": identity.get("institute_code"),
+            "cohort_id": identity.get("cohort_id"),
         },
     }
 

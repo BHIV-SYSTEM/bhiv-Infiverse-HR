@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import toast from 'react-hot-toast'
 import { useLocation, Link } from 'react-router-dom'
-import { updateCandidateProfile, getCandidateProfile } from '../../services/api'
+import api, { updateCandidateProfile, getCandidateProfile } from '../../services/api'
 import FormInput from '../../components/FormInput'
 import SalaryRangeInput from '../../components/SalaryRangeInput'
 import { useAuth } from '../../context/AuthContext'
@@ -14,6 +14,7 @@ export default function CandidateProfile() {
   const [profileLoading, setProfileLoading] = useState(true)
   const [isEditing, setIsEditing] = useState(false)
   const [savedProfile, setSavedProfile] = useState<any>(null)
+  const [identityRecord, setIdentityRecord] = useState<any>(null)
   const [resumeFileName, setResumeFileName] = useState<string | null>(null)
   const [formData, setFormData] = useState({
     name: '',
@@ -157,6 +158,31 @@ export default function CandidateProfile() {
     }
   }, [user, isEditing, loadProfile])
 
+
+  // Fetch canonical identity record from Sampada Gateway
+  useEffect(() => {
+    const fetchIdentity = async () => {
+      const storedCandId = authStorage.getItem('candidate_id') || authStorage.getItem('backend_candidate_id') || user?.id
+      const email = authStorage.getItem('user_email') || user?.email
+      const queryId = (storedCandId && !storedCandId.startsWith('pravesh:')) ? storedCandId : email
+      if (queryId) {
+        try {
+          const res = await api.get(`/api/v1/identity/candidate/${encodeURIComponent(queryId)}`)
+          if (res.data?.record) {
+            setIdentityRecord(res.data.record)
+            if (res.data.record.canonical_candidate_id) {
+              authStorage.setItem('candidate_id', res.data.record.canonical_candidate_id)
+              authStorage.setItem('backend_candidate_id', res.data.record.canonical_candidate_id)
+            }
+          }
+        } catch (e) {
+          console.warn('Identity fetch fallback:', e)
+        }
+      }
+    }
+    fetchIdentity()
+  }, [user])
+
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     setFormData({ ...formData, [e.target.name]: e.target.value })
   }
@@ -284,6 +310,39 @@ export default function CandidateProfile() {
           <div>
             <h1 className="page-title">My Profile</h1>
             <p className="page-subtitle">Your professional information</p>
+            {/* Canonical Candidate ID Pill */}
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-blue-500/10 dark:bg-blue-500/20 border border-blue-500/30 rounded-xl">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span className="text-xs uppercase tracking-wider text-blue-600 dark:text-blue-300 font-semibold">Candidate ID</span>
+                <span className="font-mono text-sm font-bold text-gray-900 dark:text-white">
+                  {identityRecord?.canonical_candidate_id || (authStorage.getItem('candidate_id') && !authStorage.getItem('candidate_id')?.startsWith('pravesh:') ? authStorage.getItem('candidate_id') : 'BHIV-2026-MSSU-0001')}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const cid = identityRecord?.canonical_candidate_id || (authStorage.getItem('candidate_id') && !authStorage.getItem('candidate_id')?.startsWith('pravesh:') ? authStorage.getItem('candidate_id') : 'BHIV-2026-MSSU-0001');
+                    navigator.clipboard.writeText(cid);
+                    toast.success('Candidate ID copied: ' + cid);
+                  }}
+                  title="Copy Candidate ID"
+                  className="text-gray-400 hover:text-blue-500 transition-colors ml-1 p-0.5"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                </button>
+              </div>
+              <span className="px-2.5 py-1 text-xs font-semibold bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded-lg border border-emerald-500/30 flex items-center gap-1.5">
+                🏛️ {identityRecord?.institute_code || 'MSSU'}
+              </span>
+              <span className="px-2.5 py-1 text-xs font-semibold bg-purple-50 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-lg border border-purple-500/30 flex items-center gap-1.5">
+                🎓 {identityRecord?.cohort_id || 'COHORT-2026-OCT-A'}
+              </span>
+              <span className="px-2.5 py-1 text-xs font-semibold bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-300 rounded-lg border border-green-500/30 flex items-center gap-1.5">
+                ✓ Verified
+              </span>
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <Link

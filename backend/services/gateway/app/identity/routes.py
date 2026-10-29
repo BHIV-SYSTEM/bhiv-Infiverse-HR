@@ -99,6 +99,10 @@ async def get_candidate(
     record = await store.get_by_local_id(identifier)
     if record is None:
         record = await store.get_by_canonical_id(identifier)
+    if record is None and "@" in identifier:
+        matches = await store.find_by_email_institute(identifier, None)
+        if matches:
+            record = matches[0]
     if record is None:
         raise HTTPException(status_code=404, detail="Identity record not found")
     return {

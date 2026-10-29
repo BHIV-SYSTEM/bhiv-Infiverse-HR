@@ -48,8 +48,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const role = ['candidate', 'recruiter', 'client'].includes(data.user.role)
           ? data.user.role
           : 'candidate'
+        const candidateId = data.user.candidate_id || data.user.id
         const ssoUser: User = {
-          id: data.user.id,
+          id: candidateId,
           email: data.user.email || '',
           name: data.user.name || '',
           role,
@@ -61,9 +62,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         authStorage.setItem('user_email', ssoUser.email)
         authStorage.setItem('user_name', ssoUser.name || '')
         authStorage.setItem('isAuthenticated', 'true')
-        if (ssoUser.id) {
-          authStorage.setItem('candidate_id', ssoUser.id)
-          authStorage.setItem('backend_candidate_id', ssoUser.id)
+        if (candidateId) {
+          authStorage.setItem('candidate_id', candidateId)
+          authStorage.setItem('backend_candidate_id', candidateId)
         }
         setUser(ssoUser)
         console.log('✅ AuthContext: Pravesh SSO auto-login as', role)
