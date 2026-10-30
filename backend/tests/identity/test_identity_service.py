@@ -313,6 +313,111 @@ async def test_envelope_cohort_override(store):
 
 
 # ---------------------------------------------------------------------------
+# University / branch (added to the shared contract — optional passthrough)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_university_and_branch_stored_and_forwarded(store):
+    result = await service.process_intake(
+        intake(university="RTM Nagpur University (RTMSSU)", branch="Computer Engineering"),
+        store,
+    )
+    rec = result["record"]
+    assert rec.university == "RTM Nagpur University (RTMSSU)"
+    assert rec.branch == "Computer Engineering"
+
+    env = service.build_enrolment_envelope(rec)
+    payload = env.model_dump()
+    assert payload["candidate"]["university"] == "RTM Nagpur University (RTMSSU)"
+    assert payload["candidate"]["branch"] == "Computer Engineering"
+
+
+@pytest.mark.asyncio
+async def test_university_and_branch_default_to_unknown(store):
+    result = await service.process_intake(intake(), store)
+    rec = result["record"]
+    assert rec.university is None  # never invented when the source omits them
+    assert rec.branch is None
+    payload = service.build_enrolment_envelope(rec).model_dump()
+    assert payload["candidate"]["university"] is None
+    assert payload["candidate"]["branch"] is None
+
+
+@pytest.mark.asyncio
+async def test_replay_fills_missing_university_but_never_overwrites(store):
+    await service.process_intake(
+        intake(source_reference="ABH-601", branch="Computer Engineering"), store
+    )
+    # Replay adds a previously-missing university and repeats the branch.
+    filled = await service.process_intake(
+        intake(
+            source_reference="ABH-601",
+            university="RTM Nagpur University",
+            branch="Computer Engineering",
+        ),
+        store,
+    )
+    assert filled["status"] == "reused"
+    assert filled["record"].university == "RTM Nagpur University"
+    assert filled["record"].branch == "Computer Engineering"
+    assert len(await store.all_records()) == 1  # still one candidate
+
+    # A conflicting branch on a later replay is reported, never applied.
+    conflict = await service.process_intake(
+        intake(source_reference="ABH-601", branch="Mechanical Engineering"), store
+    )
+    assert conflict["record"].branch == "Computer Engineering"
+    assert any("branch" in w for w in conflict["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_free_text_is_trimmed_and_length_capped(store):
+    result = await service.process_intake(
+        intake(university="  RTM Nagpur University  ", branch="   "), store
+    )
+    assert result["record"].university == "RTM Nagpur University"
+    assert result["record"].branch is None  # whitespace-only = unknown
+
+    with pytest.raises(ValueError):
+        await service.process_intake(intake(branch="x" * 201), store)
+
+
+@pytest.mark.asyncio
+async def test_campus_stored_forwarded_and_never_overwritten(store):
+    first = await service.process_intake(
+        intake(source_reference="ABH-701", campus="Kharghar"), store
+    )
+    assert first["record"].campus == "Kharghar"
+    payload = service.build_enrolment_envelope(first["record"]).model_dump()
+    assert payload["candidate"]["campus"] == "Kharghar"
+
+    # Replay with a different campus: flagged, original kept, still one record
+    conflict = await service.process_intake(
+        intake(source_reference="ABH-701", campus="Pune"), store
+    )
+    assert conflict["record"].campus == "Kharghar"
+    assert any("campus" in w for w in conflict["warnings"])
+    assert len(await store.all_records()) == 1
+
+    # No campus supplied -> stays unknown (never invented)
+    fresh = await service.process_intake(intake(source_reference="ABH-702"), store)
+    assert fresh["record"].campus is None
+
+
+@pytest.mark.asyncio
+async def test_institute_may_be_unknown_but_never_invalid(store):
+    result = await service.process_intake(
+        intake(institute_code=None), store
+    )
+    assert result["record"].institute_code is None  # unknown stays unknown
+    with pytest.raises(ValueError):
+        await service.process_intake(
+            intake(source_reference="ABH-602", institute_code="NOT-A-CODE"), store
+        )
+
+
+# ---------------------------------------------------------------------------
 # API endpoints (FastAPI TestClient, memory store, API-key auth)
 # ---------------------------------------------------------------------------
 

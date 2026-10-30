@@ -316,12 +316,12 @@ export default function CandidateProfile() {
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
                 <span className="text-xs uppercase tracking-wider text-blue-600 dark:text-blue-300 font-semibold">Candidate ID</span>
                 <span className="font-mono text-sm font-bold text-gray-900 dark:text-white">
-                  {identityRecord?.canonical_candidate_id || (authStorage.getItem('candidate_id') && !authStorage.getItem('candidate_id')?.startsWith('pravesh:') ? authStorage.getItem('candidate_id') : 'BHIV-2026-MSSU-0001')}
+                  {identityRecord?.canonical_candidate_id || (authStorage.getItem('candidate_id') && !authStorage.getItem('candidate_id')?.startsWith('pravesh:') ? authStorage.getItem('candidate_id') : 'UNKNOWN')}
                 </span>
                 <button
                   type="button"
                   onClick={() => {
-                    const cid = identityRecord?.canonical_candidate_id || (authStorage.getItem('candidate_id') && !authStorage.getItem('candidate_id')?.startsWith('pravesh:') ? authStorage.getItem('candidate_id') : 'BHIV-2026-MSSU-0001');
+                    const cid = identityRecord?.canonical_candidate_id || (authStorage.getItem('candidate_id') && !authStorage.getItem('candidate_id')?.startsWith('pravesh:') ? authStorage.getItem('candidate_id') : 'UNKNOWN');
                     navigator.clipboard.writeText(cid);
                     toast.success('Candidate ID copied: ' + cid);
                   }}
@@ -333,12 +333,31 @@ export default function CandidateProfile() {
                   </svg>
                 </button>
               </div>
-              <span className="px-2.5 py-1 text-xs font-semibold bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded-lg border border-emerald-500/30 flex items-center gap-1.5">
-                🏛️ {identityRecord?.institute_code || 'MSSU'}
-              </span>
-              <span className="px-2.5 py-1 text-xs font-semibold bg-purple-50 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-lg border border-purple-500/30 flex items-center gap-1.5">
-                🎓 {identityRecord?.cohort_id || 'COHORT-2026-OCT-A'}
-              </span>
+              {identityRecord?.institute_code && (
+                <span className="px-2.5 py-1 text-xs font-semibold bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded-lg border border-emerald-500/30 flex items-center gap-1.5">
+                  🏛️ {identityRecord.institute_code}
+                </span>
+              )}
+              {identityRecord?.university && (
+                <span className="px-2.5 py-1 text-xs font-semibold bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-lg border border-amber-500/30 flex items-center gap-1.5">
+                  🏢 {identityRecord.university}
+                </span>
+              )}
+              {identityRecord?.campus && (
+                <span className="px-2.5 py-1 text-xs font-semibold bg-sky-50 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 rounded-lg border border-sky-500/30 flex items-center gap-1.5">
+                  📍 {identityRecord.campus}
+                </span>
+              )}
+              {identityRecord?.branch && (
+                <span className="px-2.5 py-1 text-xs font-semibold bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 rounded-lg border border-indigo-500/30 flex items-center gap-1.5">
+                  🌿 {identityRecord.branch}
+                </span>
+              )}
+              {identityRecord?.cohort_id && (
+                <span className="px-2.5 py-1 text-xs font-semibold bg-purple-50 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-lg border border-purple-500/30 flex items-center gap-1.5">
+                  🎓 {identityRecord.cohort_id}
+                </span>
+              )}
               <span className="px-2.5 py-1 text-xs font-semibold bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-300 rounded-lg border border-green-500/30 flex items-center gap-1.5">
                 ✓ Verified
               </span>

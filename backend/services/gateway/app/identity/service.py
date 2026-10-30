@@ -37,6 +37,7 @@ from .models import (
     EnrolmentCandidate,
     EnrolmentEnvelope,
     IdentityRecord,
+    _clean_optional,
     normalise_institute_code,
     utc_now_iso,
 )
@@ -268,7 +269,7 @@ def new_local_id() -> str:
 def _merge_replay(
     req: AbhiruchiIntakeRequest,
     record: IdentityRecord,
-    institute: str,
+    institute: Optional[str],
     warnings: List[str],
 ) -> None:
     """Apply a replayed intake onto an existing record.
@@ -311,6 +312,27 @@ def _merge_replay(
                 f"'{record.institute_code}' — kept the existing value; "
                 "conflicting value not applied"
             )
+    # University / branch / campus follow the same fill-missing-never-overwrite rule.
+    for label, supplied, persisted in (
+        ("university", req.university, record.university),
+        ("branch", req.branch, record.branch),
+        ("campus", req.campus, record.campus),
+    ):
+        if not supplied:
+            continue
+        if not persisted:
+            if label == "university":
+                record.university = supplied
+            elif label == "branch":
+                record.branch = supplied
+            else:
+                record.campus = supplied
+        elif supplied.strip().lower() != persisted.strip().lower():
+            warnings.append(
+                f"{label} '{supplied.strip()}' differs from persisted "
+                f"'{persisted}' — kept the existing value; conflicting "
+                "value not applied"
+            )
     if req.cohort_id:
         if not record.cohort_id:
             record.cohort_id = req.cohort_id
@@ -337,6 +359,10 @@ async def process_intake(
     3. otherwise create a NEW Sampada-local record (canonical id stays UNKNOWN)
     """
     institute = normalise_institute_code(req.institute_code)
+    # Trim/validate free-text passthrough; empty becomes None (never invented).
+    university = _clean_optional(req.university, "university")
+    branch = _clean_optional(req.branch, "branch")
+    campus = _clean_optional(req.campus, "campus")
     warnings: List[str] = []
 
     record: Optional[IdentityRecord] = None
@@ -350,6 +376,8 @@ async def process_intake(
 
     if record is not None:
         status = "reused"
+        # Carry cleaned values so the replay merge sees them.
+        req.university, req.branch, req.campus = university, branch, campus
         _merge_replay(req, record, institute, warnings)
     else:
         record = IdentityRecord(
@@ -360,6 +388,9 @@ async def process_intake(
             ),
             email=req.email,
             institute_code=institute,
+            university=university,
+            branch=branch,
+            campus=campus,
             cohort_id=req.cohort_id,
             lifecycle_status=req.lifecycle_status,
             source_system=req.source_system,
@@ -413,6 +444,7 @@ async def process_intake(
             "concurrent duplicate intake detected — converged on the existing "
             "record; no duplicate candidate created"
         )
+        req.university, req.branch, req.campus = university, branch, campus
         _merge_replay(req, winner, institute, warnings)
         record = winner
         await store.save_record(record)
@@ -447,6 +479,9 @@ def build_enrolment_envelope(
             sampada_local_id=record.sampada_local_id,
             email=record.email,
             institute_code=record.institute_code,
+            university=record.university,
+            branch=record.branch,
+            campus=record.campus,
             cohort_id=cohort,
             lifecycle_status=record.lifecycle_status,
         ),

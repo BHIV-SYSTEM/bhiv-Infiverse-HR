@@ -33,9 +33,16 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def normalise_institute_code(code: str) -> str:
-    """Return a valid institute code or raise ValueError."""
+def normalise_institute_code(code: Optional[str]) -> Optional[str]:
+    """Return a valid institute code, ``None`` when genuinely unknown, or raise.
+
+    Empty/absent means the source did not state an institute — recorded as
+    unknown rather than guessed (BHIV vNEXT: unknowns stay UNKNOWN). Any
+    non-empty value outside the agreed five is rejected.
+    """
     raw = (code or "").strip().upper()
+    if not raw:
+        return None
     raw = INSTITUTE_ALIASES.get(raw, raw)
     if raw not in INSTITUTE_CODES:
         raise ValueError(
@@ -43,6 +50,16 @@ def normalise_institute_code(code: str) -> str:
             f"(MSSU is canonical for RTMSSU)"
         )
     return raw
+
+
+def _clean_optional(value: Optional[str], field: str) -> Optional[str]:
+    """Trim a free-text contract field; empty becomes None (never invented)."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    if len(text) > 200:
+        raise ValueError(f"{field} exceeds 200 characters")
+    return text
 
 
 class IdentityRecord(BaseModel):
@@ -53,6 +70,15 @@ class IdentityRecord(BaseModel):
     canonical_id_status: str = CANONICAL_ID_UNKNOWN
     email: Optional[str] = None  # linking attribute ONLY, never an identity key
     institute_code: Optional[str] = None
+    # University name and academic branch/stream as the source stated them
+    # (e.g. "RTM Nagpur University (RTMSSU)", "Computer Engineering").
+    # Optional passthrough — never derived or guessed by Sampada.
+    university: Optional[str] = None
+    branch: Optional[str] = None
+    # Campus/location as the student selected it in Abhiruchi (e.g. "Kharghar",
+    # "Pune"). Free text, optional, never derived — campuses are not part of
+    # the institute-code vocabulary.
+    campus: Optional[str] = None
     cohort_id: Optional[str] = None
     # Passthrough of the source system's own status; None when unknown.
     lifecycle_status: Optional[str] = None
@@ -75,7 +101,13 @@ class AbhiruchiIntakeRequest(BaseModel):
     source_reference: str = Field(..., min_length=1, max_length=200)
     trace_id: Optional[str] = None
     email: Optional[str] = None
-    institute_code: str
+    # Optional: an unknown institute stays unknown rather than being guessed.
+    institute_code: Optional[str] = None
+    # University and branch exactly as the candidate stated them in Abhiruchi.
+    university: Optional[str] = None
+    branch: Optional[str] = None
+    # Campus the student picked in the Abhiruchi intake dropdown.
+    campus: Optional[str] = None
     cohort_id: Optional[str] = None
     # Canonical id only when the authoritative source supplies it.
     canonical_candidate_id: Optional[str] = None
@@ -97,6 +129,9 @@ class EnrolmentCandidate(BaseModel):
     sampada_local_id: str
     email: Optional[str] = None
     institute_code: Optional[str] = None
+    university: Optional[str] = None
+    branch: Optional[str] = None
+    campus: Optional[str] = None
     cohort_id: Optional[str] = None
     lifecycle_status: Optional[str] = None
 
