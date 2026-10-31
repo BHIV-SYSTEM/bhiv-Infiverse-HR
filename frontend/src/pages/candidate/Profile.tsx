@@ -358,9 +358,16 @@ export default function CandidateProfile() {
                   🎓 {identityRecord.cohort_id}
                 </span>
               )}
-              <span className="px-2.5 py-1 text-xs font-semibold bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-300 rounded-lg border border-green-500/30 flex items-center gap-1.5">
-                ✓ Verified
-              </span>
+              {identityRecord?.canonical_id_status === 'VERIFIED' &&
+              identityRecord?.canonical_candidate_id ? (
+                <span className="px-2.5 py-1 text-xs font-semibold bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-300 rounded-lg border border-green-500/30 flex items-center gap-1.5">
+                  ✓ Verified
+                </span>
+              ) : (
+                <span className="px-2.5 py-1 text-xs font-semibold bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 rounded-lg border border-amber-500/30 flex items-center gap-1.5">
+                  ⏳ Awaiting verification
+                </span>
+              )}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-3">

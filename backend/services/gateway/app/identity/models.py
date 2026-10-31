@@ -111,6 +111,10 @@ class AbhiruchiIntakeRequest(BaseModel):
     cohort_id: Optional[str] = None
     # Canonical id only when the authoritative source supplies it.
     canonical_candidate_id: Optional[str] = None
+    # Accepted alias some intake clients send instead of
+    # canonical_candidate_id. Normalised into the field above by the route;
+    # it is never treated as a second identity key.
+    candidate_id: Optional[str] = None
     # Source's own lifecycle status, passed through untouched (never invented).
     lifecycle_status: Optional[str] = None
 

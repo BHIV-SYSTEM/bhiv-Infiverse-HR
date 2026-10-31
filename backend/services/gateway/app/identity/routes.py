@@ -78,6 +78,12 @@ async def abhiruchi_intake(
     Sampada never invents one (status stays UNKNOWN). Same-email records are
     flagged as possible duplicates and never merged.
     """
+    # Some intake clients send the canonical id as `candidate_id`. Normalise
+    # the alias here so the id is recorded either way (Sampada still never
+    # invents one: an absent value stays UNKNOWN).
+    if not body.canonical_candidate_id and body.candidate_id:
+        body.canonical_candidate_id = body.candidate_id.strip() or None
+
     try:
         result = await service.process_intake(body, await _store())
     except ValueError as exc:
