@@ -105,6 +105,23 @@ async def exchange_session(request: Request):
         except Exception:
             pass
 
+        # Fallback to live Abhiruchi students registry if not in store
+        if not candidate_id:
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=8.0) as client:
+                    resp = await client.get("https://abhiruchi.blackholeinfiverse.com/api/students")
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        students = data if isinstance(data, list) else data.get("students", [])
+                        for s in students:
+                            if (s.get("email") or "").strip().lower() == email.lower():
+                                candidate_id = s.get("candidate_id") or s.get("student_id")
+                                if candidate_id:
+                                    break
+            except Exception:
+                pass
+
     resolved_candidate_id = candidate_id or local_user_id
     now = int(time.time())
     payload = {
