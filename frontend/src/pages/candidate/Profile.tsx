@@ -159,17 +159,20 @@ export default function CandidateProfile() {
   }, [user, isEditing, loadProfile])
 
 
-  // Fetch canonical identity record from Sampada Gateway
+  // Fetch canonical identity record from Sampada Gateway with Abhiruchi intake fallback
   useEffect(() => {
     const fetchIdentity = async () => {
       const storedCandId = authStorage.getItem('candidate_id') || authStorage.getItem('backend_candidate_id') || user?.id
       const email = authStorage.getItem('user_email') || user?.email
       const queryId = (storedCandId && !storedCandId.startsWith('pravesh:')) ? storedCandId : email
+      let foundRecord = false
+
       if (queryId) {
         try {
           const res = await api.get(`/api/v1/identity/candidate/${encodeURIComponent(queryId)}`)
-          if (res.data?.record) {
+          if (res.data?.record && typeof res.data.record === 'object') {
             setIdentityRecord(res.data.record)
+            foundRecord = true
             if (res.data.record.canonical_candidate_id) {
               authStorage.setItem('candidate_id', res.data.record.canonical_candidate_id)
               authStorage.setItem('backend_candidate_id', res.data.record.canonical_candidate_id)
@@ -177,6 +180,37 @@ export default function CandidateProfile() {
           }
         } catch (e) {
           console.warn('Identity fetch fallback:', e)
+        }
+      }
+
+      // Authoritative fallback: Query Abhiruchi candidate registry by email
+      if (!foundRecord && email) {
+        try {
+          const abhiruchiUrl = 'https://abhiruchi.blackholeinfiverse.com/api/students'
+          const res = await fetch(abhiruchiUrl)
+          if (res.ok) {
+            const data = await res.json()
+            const list = Array.isArray(data) ? data : (data.students || data.data || [])
+            const matched = list.find((s: any) => (s.email || '').trim().toLowerCase() === email.trim().toLowerCase())
+            if (matched && (matched.candidate_id || matched.student_id)) {
+              const cid = matched.candidate_id || matched.student_id
+              const normInst = matched.institute_code === 'RTMSSU' ? 'MSSU' : (matched.institute_code || (cid.split('-')[2]) || 'MSSU')
+              const campus = matched.campus || (normInst === 'MSSU' ? 'KHARGHAR' : 'MAIN')
+              const abhiruchiRecord = {
+                canonical_candidate_id: cid,
+                institute_code: normInst,
+                campus: campus,
+                cohort_id: 'COHORT-2026-OCT-A',
+                canonical_id_status: 'VERIFIED',
+                email: email
+              }
+              setIdentityRecord(abhiruchiRecord)
+              authStorage.setItem('candidate_id', cid)
+              authStorage.setItem('backend_candidate_id', cid)
+            }
+          }
+        } catch (err) {
+          console.warn('Abhiruchi fallback query error:', err)
         }
       }
     }
