@@ -3,6 +3,8 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
 import SplashScreen from './components/SplashScreen'
 import AuthPage from './pages/auth/AuthPage'
+import AdminLoginPage from './pages/auth/AdminLoginPage'
+import AdminTenantsPage from './pages/admin/AdminTenantsPage'
 import { ThemeProvider } from './context/ThemeContext'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import ProtectedRoute, { PublicRoute } from './components/ProtectedRoute'
@@ -45,6 +47,7 @@ import ClientCandidates from './pages/client/ClientCandidates'
 import MatchResults from './pages/client/MatchResults'
 import ClientReports from './pages/client/ClientReports'
 import LiveRecruiterMonitoring from './pages/client/LiveRecruiterMonitoring'
+import SubClients from './pages/client/SubClients'
 import ControlCenter from './pages/control/ControlCenter'
 
 function HomeRedirect() {
@@ -62,7 +65,8 @@ function HomeRedirect() {
     candidate: '/candidate/dashboard',
     recruiter: '/recruiter',
     client: '/client',
-    admin: '/control',
+    // Platform admins get their own console (tenant hierarchy), not the Control Center.
+    admin: '/admin/tenants',
   }
 
   if (user) {
@@ -99,6 +103,18 @@ function App() {
               {/* Public Routes */}
               <Route path="/" element={<HomeRedirect />} />
               <Route path="/auth" element={<PublicRoute><AuthPage /></PublicRoute>} />
+
+              {/* Platform admin (multi-tenant hierarchy) — the admin link */}
+              <Route path="/admin" element={<Navigate to="/admin/login" replace />} />
+              <Route path="/admin/login" element={<PublicRoute><AdminLoginPage /></PublicRoute>} />
+              <Route
+                path="/admin/tenants"
+                element={
+                  <ProtectedRoute allowedRoles={['admin']}>
+                    <AdminTenantsPage />
+                  </ProtectedRoute>
+                }
+              />
               <Route
                 path="/control"
                 element={
@@ -165,6 +181,7 @@ function App() {
                 <Route path="matches" element={<MatchResults />} />
                 <Route path="live-monitoring" element={<LiveRecruiterMonitoring />} />
                 <Route path="reports" element={<ClientReports />} />
+                <Route path="sub-clients" element={<SubClients />} />
               </Route>
 
               {/* Fallback - re-evaluate via HomeRedirect */}

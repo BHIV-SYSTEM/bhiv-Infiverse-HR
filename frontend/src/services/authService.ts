@@ -41,6 +41,11 @@ class AuthService {
       // Get role from parameter, or from localStorage (stored during registration)
       // This ensures we use the role the user registered with
       const storedRole = authStorage.getItem('user_role');
+      // `role` is set only when the caller chose it deliberately (admin login
+      // page, signup auto-login). A stored role is just a routing hint — guest
+      // sessions always write 'candidate' and admin sessions write 'admin', so
+      // it must never lock the other login endpoints out.
+      const explicitRole = role;
       const userRole = role || storedRole;
       
       let response;
@@ -51,117 +56,87 @@ class AuthService {
         console.log('🔐 No role found, attempting auto-detection...');
         
         // Try client login first
+        const autoDetect = await this.performClientLogin(email, password);
+        if (autoDetect.success) {
+          return autoDetect;
+        }
+        console.log('🔐 Client login failed, trying candidate/recruiter login');
+      }
+      
+      // Platform admin (multi-tenant hierarchy) uses /v1/admin/login
+      if (userRole === 'admin') {
         try {
-          const clientResponse = await axios.post(`${this.API_BASE_URL}/v1/client/login`, {
+          response = await axios.post(`${this.API_BASE_URL}/v1/admin/login`, {
             email: email,
             password: password
           });
-          
-          if (clientResponse.data.success && clientResponse.data.access_token) {
-            const token = clientResponse.data.access_token;
-            const userData = {
-              id: clientResponse.data.client_id,
-              email: email,
-              name: clientResponse.data.company_name || '',
-              role: 'client',
-              company: clientResponse.data.company_name
+
+          const data = response.data;
+          if (data.success && data.access_token) {
+            const token = data.access_token;
+            if (!token || token.trim() === '') {
+              return { success: false, error: 'Invalid token received from server' };
+            }
+            const userData: User = {
+              id: data.email || email,
+              email: data.email || email,
+              name: 'Platform Admin',
+              role: 'admin'
             };
-            
-            console.log('🔐 Auto-detected: Client');
+
             this.setAuthToken(token);
             authStorage.setItem(this.TOKEN_KEY, token);
             authStorage.setItem('auth_token', token);
             authStorage.setItem(this.USER_KEY, JSON.stringify(userData));
-            authStorage.setItem('client_id', clientResponse.data.client_id);
-            authStorage.setItem('user_role', 'client');
-            
+            authStorage.setItem('user_role', 'admin');
+            authStorage.setItem('user_email', userData.email);
+            authStorage.setItem('user_name', userData.name || 'Platform Admin');
+            authStorage.setItem('isAuthenticated', 'true');
+
+            return { success: true, token: token, user: userData };
+          }
+          const detail = typeof data.detail === 'string' ? data.detail : '';
+          if (explicitRole) {
             return {
-              success: true,
-              token: token,
-              user: userData
+              success: false,
+              error: data.error || detail || 'Admin login failed. Please check your credentials.'
             };
           }
-        } catch (clientError: any) {
-          // Client login failed, will try candidate/recruiter login below
-          console.log('🔐 Client login failed, trying candidate/recruiter login');
+          // Stored 'admin' is only a stale hint — fall through to the
+          // candidate/client chain below instead of failing the login.
+        } catch (adminError: any) {
+          console.error('❌ Admin login error:', adminError.response?.data?.error || adminError.message);
+          const payload = adminError.response?.data;
+          let message = payload?.error;
+          if (!message && typeof payload?.detail === 'string') message = payload.detail;
+          if (!message && Array.isArray(payload?.detail)) {
+            message = payload.detail.map((d: any) => d.msg || d.message || '').filter(Boolean).join('; ');
+          }
+          if (!message && adminError.response?.status) {
+            message = `Admin login failed (HTTP ${adminError.response.status}).`;
+          }
+          if (!message) {
+            message = `Cannot reach the gateway at ${this.API_BASE_URL}. Is the backend running?`;
+          }
+          if (explicitRole) {
+            return { success: false, error: message };
+          }
+          // Stored 'admin' is only a stale hint — fall through to the
+          // candidate/client chain below instead of failing the login.
         }
       }
-      
+
       // Use stored role to determine which endpoint to call
       // Client uses /v1/client/login, candidate/recruiter use /v1/candidate/login
       if (userRole === 'client') {
-        // Try client login with email (backend now supports email-based login)
-        try {
-          response = await axios.post(`${this.API_BASE_URL}/v1/client/login`, {
-            email: email,
-            password: password
-          });
-          
-          if (response.data.success && response.data.access_token) {
-            const token = response.data.access_token;
-            
-            // Validate token is not empty
-            if (!token || token.trim() === '') {
-              console.error('❌ Client login response has empty token!');
-              return { success: false, error: 'Invalid token received from server' };
-            }
-            
-            const userData = {
-              id: response.data.client_id,
-              email: email,
-              name: response.data.company_name || '',
-              role: 'client',
-              company: response.data.company_name
-            };
-            
-            // Store token using multiple methods to ensure it's saved
-            console.log('🔐 Storing client auth token after login');
-            console.log('🔐 Client token length:', token.length);
-            console.log('🔐 Client token first 50 chars:', token.substring(0, 50));
-            
-            this.setAuthToken(token);
-            authStorage.setItem(this.TOKEN_KEY, token);
-            authStorage.setItem('auth_token', token);
-            
-            const storedToken = authStorage.getItem(this.TOKEN_KEY);
-            const storedTokenDirect = authStorage.getItem('auth_token');
-            
-            if (!storedToken && !storedTokenDirect) {
-              console.error('❌ CRITICAL: Failed to store client token! Auth storage may be disabled or full.');
-              console.error('❌ Available storage keys:', typeof sessionStorage !== 'undefined' ? Object.keys(sessionStorage) : []);
-            } else if (storedToken !== token && storedTokenDirect !== token) {
-              console.error('❌ Client token stored but value mismatch!');
-              console.error('❌ Expected length:', token.length, 'Stored length:', storedToken?.length || storedTokenDirect?.length);
-            } else {
-              console.log('✅ Client token stored successfully');
-              console.log('✅ Client token verification: Stored token matches');
-            }
-            
-            authStorage.setItem(this.USER_KEY, JSON.stringify(userData));
-            authStorage.setItem('client_id', response.data.client_id);
-            authStorage.setItem('user_role', 'client');
-            
-            return {
-              success: true,
-              token: token,
-              user: userData
-            };
-          } else {
-            console.error('❌ Client login failed: No access_token in response', response.data);
-            return {
-              success: false,
-              error: response.data.error || 'Client login failed. No token received.'
-            };
-          }
-        } catch (clientError: any) {
-          // If client login fails, don't fall back to candidate login
-          // Return error so user knows client login failed
-          console.error('❌ Client login error:', clientError.response?.data?.error || clientError.message);
-          return {
-            success: false,
-            error: clientError.response?.data?.error || 'Client login failed. Please check your credentials.'
-          };
+        const clientResult = await this.performClientLogin(email, password);
+        if (clientResult.success || explicitRole) {
+          // Explicit client intent (signup auto-login) surfaces the client
+          // endpoint's own error (locked / password-setup / invalid) directly.
+          return clientResult;
         }
+        // Stored 'client' is only a stale hint — fall through to the
+        // candidate chain below.
       }
       
       // For recruiter and candidate (or client fallback), use candidate login
@@ -178,56 +153,41 @@ class AuthService {
             candidateError.response?.data?.error?.includes('Invalid credentials') ||
             candidateError.response?.data?.error?.includes('Invalid')) {
           console.log('🔐 Candidate login failed, trying client login as fallback...');
-          
-          try {
-            response = await axios.post(`${this.API_BASE_URL}/v1/client/login`, {
-              email: email,
-              password: password
-            });
-            
-            if (response.data.success && response.data.access_token) {
-              // Client login succeeded - handle it
-              const token = response.data.access_token;
-              
-              if (!token || token.trim() === '') {
-                console.error('❌ Client login response has empty token!');
-                return { success: false, error: 'Invalid token received from server' };
-              }
-              
-              const userData = {
-                id: response.data.client_id,
-                email: email,
-                name: response.data.company_name || '',
-                role: 'client',
-                company: response.data.company_name
-              };
-              
-              console.log('🔐 Storing client auth token after fallback login');
-              this.setAuthToken(token);
-              authStorage.setItem(this.TOKEN_KEY, token);
-              authStorage.setItem('auth_token', token);
-              authStorage.setItem(this.USER_KEY, JSON.stringify(userData));
-              authStorage.setItem('client_id', response.data.client_id);
-              authStorage.setItem('user_role', 'client');
-              
-              return {
-                success: true,
-                token: token,
-                user: userData
-              };
-            }
-          } catch (clientFallbackError: any) {
-            // Both logins failed
-            console.error('❌ Both candidate and client login failed');
-            return {
-              success: false,
-              error: candidateError.response?.data?.error || 'Invalid credentials'
-            };
+          const thrownFallback = await this.performClientLogin(email, password);
+          if (thrownFallback.success) {
+            return thrownFallback;
           }
+          console.error('❌ Both candidate and client login failed');
+          return {
+            success: false,
+            error: candidateError.response?.data?.error || 'Invalid credentials'
+          };
         }
         
         // Re-throw if it's not an "Invalid credentials" error
         throw candidateError;
+      }
+
+      // The candidate endpoint answers HTTP 200 with success:false for bad
+      // credentials (it never throws), so the catch-based fallback above never
+      // fires for it. Retry the client portal before giving up — without this,
+      // a stale candidate role in localStorage (guest sessions always write
+      // one) blocks tenant-provisioned client accounts from signing in.
+      if (!response?.data?.token || !response?.data?.success) {
+        if (!explicitRole) {
+          const clientResult = await this.performClientLogin(email, password);
+          if (clientResult.success) {
+            return clientResult;
+          }
+          return {
+            success: false,
+            error: clientResult.error || response?.data?.error || 'Invalid credentials'
+          };
+        }
+        return {
+          success: false,
+          error: response?.data?.error || 'Invalid credentials'
+        };
       }
 
       // Backend returns 'candidate' but we need to set correct role
@@ -297,6 +257,47 @@ class AuthService {
       return { 
         success: false, 
         error: error.response?.data?.error || error.response?.data?.message || error.message || 'Login failed' 
+      };
+    }
+  }
+
+  // POST /v1/client/login and persist the session on success. Never throws —
+  // returns the normalized AuthResponse so callers can chain fallbacks.
+  private async performClientLogin(email: string, password: string): Promise<AuthResponse> {
+    try {
+      const response = await axios.post(`${this.API_BASE_URL}/v1/client/login`, {
+        email,
+        password
+      });
+      const data = response.data;
+      if (data?.success && data.access_token) {
+        const token = String(data.access_token);
+        if (!token.trim()) {
+          return { success: false, error: 'Invalid token received from server' };
+        }
+        const userData = {
+          id: data.client_id,
+          email: email,
+          name: data.company_name || '',
+          role: 'client',
+          company: data.company_name
+        };
+        this.setAuthToken(token);
+        authStorage.setItem(this.TOKEN_KEY, token);
+        authStorage.setItem('auth_token', token);
+        authStorage.setItem(this.USER_KEY, JSON.stringify(userData));
+        authStorage.setItem('client_id', data.client_id);
+        authStorage.setItem('user_role', 'client');
+        return { success: true, token: token, user: userData };
+      }
+      return {
+        success: false,
+        error: data?.error || 'Client login failed. Please check your credentials.'
+      };
+    } catch (error: any) {
+      return {
+        success: false,
+        error: error?.response?.data?.error || 'Client login failed. Please check your credentials.'
       };
     }
   }

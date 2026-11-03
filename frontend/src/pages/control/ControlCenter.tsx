@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import Loading from '../../components/Loading'
 import {
   AlertCard,
@@ -877,6 +878,16 @@ export default function ControlCenter() {
           </nav>
 
           <div className="shrink-0 flex items-center gap-2">
+            {String(userRole) === 'admin' ? (
+              <Link
+                id="control-center-admin-console-link"
+                to="/admin/tenants"
+                title="Open the platform admin console (tenant hierarchy)"
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-gradient-to-r from-blue-500 to-cyan-500 text-white shadow-md shadow-blue-500/30 hover:opacity-90 transition-all whitespace-nowrap"
+              >
+                Admin Console
+              </Link>
+            ) : null}
             <span className="text-[10px] text-slate-400 dark:text-slate-500">
               Last refresh: {lastRefresh ? lastRefresh.toLocaleTimeString() : 'Pending'}
             </span>

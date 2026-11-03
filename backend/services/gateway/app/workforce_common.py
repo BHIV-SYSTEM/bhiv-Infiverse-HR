@@ -46,8 +46,22 @@ def doc_id_filter(entity_id: str) -> Dict[str, Any]:
 
 
 def workforce_scope_filter(scope: Dict[str, Any]) -> Dict[str, Any]:
+    """Tenant isolation filter for workforce documents.
+
+    * platform scope          -> no filter (everything)
+    * key account (hierarchy) -> its own id plus every tenant/client id in
+      its subtree (``visible_tenant_ids``)
+    * single tenant           -> exactly ``{"tenant_id": <id>}``, identical to
+      the pre-tenancy filter when no hierarchy is configured
+    """
     if scope.get("scope") == "platform":
         return {}
+    visible = [str(v) for v in (scope.get("visible_tenant_ids") or []) if str(v)]
+    if visible:
+        unique = list(dict.fromkeys(visible))
+        if len(unique) == 1:
+            return {"tenant_id": unique[0]}
+        return {"tenant_id": {"$in": unique}}
     tenant_id = scope.get("tenant_id") or scope.get("user_id")
     return {"tenant_id": str(tenant_id) if tenant_id else "__none__"}
 

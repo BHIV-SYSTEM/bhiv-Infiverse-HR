@@ -54,6 +54,7 @@ from app.control_center_governance import (
     list_audit_events,
     build_audit_replay,
 )
+from app import tenant_registry
 from bson import ObjectId
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, field_validator, Field, model_validator
@@ -229,7 +230,12 @@ else:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins_list,
-    allow_origin_regex=r"https://.*\.onrender\.com|https://.*\.vercel\.app|https://.*\.blackholeinfiverse\.com",
+    # Local dev may be opened on any loopback port (localhost:3000/5173/3001,
+    # 127.0.0.1:...); a loopback origin is never reachable by a third-party site.
+    allow_origin_regex=(
+        r"https://.*\.onrender\.com|https://.*\.vercel\.app|https://.*\.blackholeinfiverse\.com"
+        r"|http://localhost(:\d+)?|http://127\.0\.0\.1(:\d+)?"
+    ),
     # Credentials must be allowed for the Pravesh (blackhole_auth) SSO cookie
     # exchange: the browser POSTs to /api/v1/pravesh/exchange with
     # credentials: 'include'. Origins stay an explicit list/regex (never "*"),
@@ -305,6 +311,15 @@ try:
     print("Workforce governance routes loaded")
 except ImportError as e:
     print(f"WARNING: workforce governance routes not available: {e}")
+
+# Multi-tenant hierarchy (platform -> key account -> account) + admin login
+try:
+    from routes.tenancy_routes import router as tenancy_router
+
+    app.include_router(tenancy_router)
+    print("Tenancy hierarchy routes loaded")
+except ImportError as e:
+    print(f"WARNING: tenancy routes not available: {e}")
 
 # Pravesh (blackhole_auth) SSO read-only bridge — identity verification only,
 # never creates or merges accounts. Disabled unless PRAVESH_JWT_SECRET is set.
@@ -506,6 +521,19 @@ async def correlation_id_middleware(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Correlation-ID"] = correlation_id
     return response
+
+@app.middleware("http")
+async def tenant_registry_middleware(request: Request, call_next):
+    """Keep the tenant hierarchy snapshot fresh (TTL) for scope resolution.
+
+    Failures are swallowed: without tenants configured the gateway keeps its
+    pre-tenancy single-tenant behaviour.
+    """
+    try:
+        await tenant_registry.ensure_loaded()
+    except Exception as _tenancy_exc:
+        logger.debug("[tenancy] registry refresh skipped: %s", _tenancy_exc)
+    return await call_next(request)
 
 class JobCreate(BaseModel):
     title: str
@@ -2273,37 +2301,54 @@ async def _client_connected_recruiter_ids(db, client_id: str) -> List[str]:
 
 
 async def _client_job_ids_for_dashboard(db, client_id: str) -> List[str]:
-    """Job IDs for client dashboard: client's own jobs + all jobs by all connected recruiters. When disconnected, only client's jobs."""
-    own_ids = await _client_job_ids(db, client_id)
-    recruiter_ids = await _client_connected_recruiter_ids(db, client_id)
-    if not recruiter_ids:
-        return own_ids
-    cursor = db.jobs.find({"status": "active", "recruiter_id": {"$in": recruiter_ids}}, {"_id": 1}).limit(1000)
-    recruiter_jobs = await cursor.to_list(length=1000)
-    seen = set(own_ids)
-    for doc in recruiter_jobs:
-        jid = str(doc["_id"])
-        if jid not in seen:
-            seen.add(jid)
-            own_ids.append(jid)
-    return own_ids
+    """Job IDs for client dashboard: client's own jobs + all jobs by all connected recruiters. When disconnected, only client's jobs.
+
+    Tenant hierarchy: a key account also receives the jobs of every linked
+    sub-client in its subtree. A single client (or no tenants configured)
+    resolves to exactly one id, preserving pre-tenancy behaviour.
+    """
+    ids: List[str] = []
+    seen: set = set()
+    for cid in tenant_registry.visible_client_ids(client_id) or [client_id]:
+        own_ids = await _client_job_ids(db, cid)
+        recruiter_ids = await _client_connected_recruiter_ids(db, cid)
+        if recruiter_ids:
+            cursor = db.jobs.find({"status": "active", "recruiter_id": {"$in": recruiter_ids}}, {"_id": 1}).limit(1000)
+            recruiter_jobs = await cursor.to_list(length=1000)
+            for doc in recruiter_jobs:
+                jid = str(doc["_id"])
+                if jid not in own_ids:
+                    own_ids.append(jid)
+        for jid in own_ids:
+            if jid not in seen:
+                seen.add(jid)
+                ids.append(jid)
+    return ids
 
 
 async def _client_all_job_ids_for_dashboard(db, client_id: str) -> List[str]:
-    """All job IDs (any status) for client dashboard: client's jobs + all connected recruiters' jobs."""
-    own_ids = await _client_all_job_ids(db, client_id)
-    recruiter_ids = await _client_connected_recruiter_ids(db, client_id)
-    if not recruiter_ids:
-        return own_ids
-    cursor = db.jobs.find({"recruiter_id": {"$in": recruiter_ids}}, {"_id": 1}).limit(1000)
-    recruiter_jobs = await cursor.to_list(length=1000)
-    seen = set(own_ids)
-    for doc in recruiter_jobs:
-        jid = str(doc["_id"])
-        if jid not in seen:
-            seen.add(jid)
-            own_ids.append(jid)
-    return own_ids
+    """All job IDs (any status) for client dashboard: client's jobs + all connected recruiters' jobs.
+
+    Tenant hierarchy: a key account also receives every linked sub-client's
+    jobs inside its subtree; otherwise behaviour is unchanged.
+    """
+    ids: List[str] = []
+    seen: set = set()
+    for cid in tenant_registry.visible_client_ids(client_id) or [client_id]:
+        own_ids = await _client_all_job_ids(db, cid)
+        recruiter_ids = await _client_connected_recruiter_ids(db, cid)
+        if recruiter_ids:
+            cursor = db.jobs.find({"recruiter_id": {"$in": recruiter_ids}}, {"_id": 1}).limit(1000)
+            recruiter_jobs = await cursor.to_list(length=1000)
+            for doc in recruiter_jobs:
+                jid = str(doc["_id"])
+                if jid not in own_ids:
+                    own_ids.append(jid)
+        for jid in own_ids:
+            if jid not in seen:
+                seen.add(jid)
+                ids.append(jid)
+    return ids
 
 
 async def _recruiter_all_job_ids_for_dashboard(db, recruiter_id: str) -> List[str]:
@@ -4117,8 +4162,20 @@ async def client_login(login_data: ClientLogin):
             client = await db.clients.find_one({"client_id": login_data.client_id})
         
         if not client and login_data.email:
-            # Try finding by email (stored as 'email' field in clients collection)
-            client = await db.clients.find_one({"email": login_data.email})
+            # Try finding by email (stored as 'email' field in clients collection).
+            # Register/provision normalize emails to lowercase, so accept the
+            # email in whatever casing/whitespace the user types it.
+            raw_email = str(login_data.email).strip()
+            client = await db.clients.find_one({"email": raw_email})
+            if not client:
+                lowered_email = raw_email.lower()
+                if lowered_email != raw_email:
+                    client = await db.clients.find_one({"email": lowered_email})
+            if not client and raw_email:
+                # Legacy/seed docs may hold mixed case — case-insensitive fallback
+                client = await db.clients.find_one(
+                    {"email": {"$regex": f"^{re.escape(raw_email)}$", "$options": "i"}}
+                )
         
         if not client:
             return {"success": False, "error": "Invalid credentials"}
@@ -4165,7 +4222,7 @@ async def client_login(login_data: ClientLogin):
             "sub": client_id,  # Standard JWT claim for subject/user ID
             "client_id": client_id,  # Keep for backward compatibility
             "user_id": client_id,  # Also include user_id for jwt_auth.py compatibility
-            "email": client.get("contact_email", ""),
+            "email": client.get("email") or client.get("contact_email", ""),
             "company_name": client.get("company_name"),
             "role": "client",  # Explicit role for jwt_auth.py
             "exp": int(datetime.now(timezone.utc).timestamp()) + 86400  # 24 hours

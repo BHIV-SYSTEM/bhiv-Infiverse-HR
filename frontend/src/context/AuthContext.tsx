@@ -12,7 +12,7 @@ interface User {
 interface AuthContextType {
   user: User | null;
   loading: boolean;
-  signIn: (email: string, password: string) => Promise<{ error: any }>;
+  signIn: (email: string, password: string, role?: string) => Promise<{ error: any }>;
   signUp: (email: string, password: string, userData: { name: string; role: string; company?: string; phone?: string }) => Promise<{ error: any; user?: User }>;
   signOut: () => Promise<void>;
   isGuest: boolean;
@@ -158,16 +158,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const handleSignIn = async (email: string, password: string) => {
+  const handleSignIn = async (email: string, password: string, role?: string) => {
     try {
       const storedRole = authStorage.getItem('user_role');
       
-      console.log('🔐 AuthContext: Attempting login with stored role:', storedRole || 'auto-detect');
+      console.log('🔐 AuthContext: Attempting login with stored role:', role || storedRole || 'auto-detect');
       
       const authService = (await import('../services/authService')).default;
-      // Pass the stored role to login function
-      // If no role is stored, authService will auto-detect by trying both endpoints
-      const result = await authService.login(email, password, storedRole || undefined);
+      // Pass only the explicit role (e.g. 'admin' from the admin login page,
+      // the chosen role from signup auto-login). authService reads the stored
+      // role itself as a routing *hint* — a stale guest/admin leftover must
+      // not lock other login endpoints out.
+      const result = await authService.login(email, password, role || undefined);
       
       console.log('🔐 AuthContext: Login result:', { 
         success: result.success, 

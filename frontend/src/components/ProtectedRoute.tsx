@@ -58,6 +58,7 @@ export default function ProtectedRoute({
         candidate: '/candidate/dashboard',
         recruiter: '/recruiter',
         client: '/client',
+        admin: '/admin/tenants',
       }
       
       const redirectPath = roleRedirects[userRole] || '/'
@@ -98,6 +99,7 @@ export function PublicRoute({ children }: { children: React.ReactNode }) {
       candidate: '/candidate/dashboard',
       recruiter: '/recruiter',
       client: '/client',
+      admin: '/admin/tenants',
     }
     return <Navigate to={roleRedirects[userRole] || '/'} replace />
   }

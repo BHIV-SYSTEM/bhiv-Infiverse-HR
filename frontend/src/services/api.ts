@@ -2290,4 +2290,147 @@ export const getDetailedHealth = async () => {
   }
 }
 
+// ==================== TENANCY HIERARCHY API ====================
+// platform -> key account -> account (account isolation layer)
+
+export interface TenantClientAccount {
+  client_id: string
+  company_name?: string
+  email?: string
+  status?: string
+}
+
+export interface TenantNode {
+  tenant_id: string
+  name: string
+  level: 'key_account' | 'account'
+  parent_tenant_id: string
+  path: string
+  client_ids: string[]
+  status: 'active' | 'suspended'
+  created_at?: string | null
+  client_accounts?: TenantClientAccount[]
+  children?: TenantNode[]
+}
+
+export interface TenantInfo {
+  success: boolean
+  scope: 'platform' | 'client'
+  linked: boolean
+  client_id?: string
+  tenant_id?: string
+  name?: string
+  level?: string | null
+  parent_tenant_id?: string
+  path?: string
+  status?: string
+  is_key_account: boolean
+  client_ids?: string[]
+  visible_client_ids?: string[]
+  sub_client_count?: number
+}
+
+export interface SubClient {
+  tenant_id: string
+  name: string
+  level: string
+  status: string
+  path: string
+  client_ids: string[]
+  client_accounts?: TenantClientAccount[]
+  created_at?: string | null
+}
+
+export const fetchTenantInfo = async (): Promise<TenantInfo> => {
+  const response = await api.get('/v1/tenant/info', { headers: getAuthHeaders() })
+  return response.data
+}
+
+export const fetchTenantSubClients = async (): Promise<{
+  tenant: { tenant_id: string; name: string; path: string }
+  sub_clients: SubClient[]
+  count: number
+  visible_client_ids: string[]
+}> => {
+  const response = await api.get('/v1/tenant/sub-clients', { headers: getAuthHeaders() })
+  return response.data
+}
+
+export interface CreateSubClientPayload {
+  name: string
+  email: string
+  password?: string
+  company_name?: string
+}
+
+export const createTenantSubClient = async (payload: CreateSubClientPayload) => {
+  const response = await api.post('/v1/tenant/sub-clients', payload, { headers: getAuthHeaders() })
+  return response.data
+}
+
+export interface AdminTenantsResponse {
+  success: boolean
+  tree: TenantNode[]
+  tenants: TenantNode[]
+  counts: { key_accounts: number; accounts: number; linked_clients: number }
+}
+
+export const fetchAdminTenants = async (): Promise<AdminTenantsResponse> => {
+  const response = await api.get('/v1/admin/tenants', { headers: getAuthHeaders() })
+  return response.data
+}
+
+export interface CreateTenantPayload {
+  name: string
+  level: 'key_account' | 'account'
+  tenant_id?: string
+  parent_tenant_id?: string
+  client_id?: string
+  provision_client?: { email: string; password?: string; company_name?: string }
+}
+
+export const createAdminTenant = async (payload: CreateTenantPayload) => {
+  const response = await api.post('/v1/admin/tenants', payload, { headers: getAuthHeaders() })
+  return response.data
+}
+
+export const updateAdminTenant = async (
+  tenantId: string,
+  payload: { name?: string; status?: string }
+) => {
+  const response = await api.patch(`/v1/admin/tenants/${encodeURIComponent(tenantId)}`, payload, {
+    headers: getAuthHeaders(),
+  })
+  return response.data
+}
+
+export const linkTenantClient = async (tenantId: string, clientId: string) => {
+  const response = await api.post(
+    `/v1/admin/tenants/${encodeURIComponent(tenantId)}/link-client`,
+    { client_id: clientId },
+    { headers: getAuthHeaders() }
+  )
+  return response.data
+}
+
+export interface AdminClientAccount {
+  client_id: string
+  company_name: string
+  email: string
+  status: string
+  client_code: string
+  created_at: string | null
+  linked_tenant_id: string | null
+}
+
+export const fetchAdminClients = async (
+  search = ''
+): Promise<{ success: boolean; count: number; clients: AdminClientAccount[] }> => {
+  const response = await api.get('/v1/admin/clients', {
+    params: search ? { search } : {},
+    headers: getAuthHeaders(),
+  })
+  return response.data
+}
+
 export default api

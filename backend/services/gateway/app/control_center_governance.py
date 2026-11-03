@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 
+from app import tenant_registry
+
 CONTROL_CENTER_ROLES = frozenset({"client", "recruiter", "admin"})
 AUDIT_EVENT_TYPES = ("control_center", "governance", "policy", "workforce")
 
@@ -30,6 +32,12 @@ def resolve_policy_scope(auth: Dict[str, Any]) -> Dict[str, Any]:
     user_id = str(auth.get("user_id", "") or "")
 
     if role == "client":
+        # Tenant hierarchy (platform -> key_account -> account). The visible
+        # sets are supersets of [user_id]: with no tenants configured they are
+        # exactly [user_id], i.e. the pre-tenancy single-tenant behaviour.
+        visible_clients = tenant_registry.visible_client_ids(user_id) or [user_id]
+        visible_tenants = tenant_registry.visible_tenant_ids(user_id) or [user_id]
+        node = tenant_registry.node_for_client(user_id)
         return {
             "scope": "client",
             "scope_label": f"client:{user_id}",
@@ -38,6 +46,10 @@ def resolve_policy_scope(auth: Dict[str, Any]) -> Dict[str, Any]:
             "tenant_id": user_id,
             "org_id": user_id,
             "workforce_category": "client_workforce",
+            "visible_client_ids": visible_clients,
+            "visible_tenant_ids": visible_tenants,
+            "tenant_kind": node.level if node else None,
+            "root_tenant_id": node.tenant_id if node else None,
         }
     if role == "recruiter":
         return {
@@ -124,19 +136,29 @@ async def _client_connected_recruiter_ids(db, client_id: str) -> List[str]:
 
 
 async def _client_all_job_ids_for_dashboard(db, client_id: str) -> List[str]:
-    own_ids = await _client_all_job_ids(db, client_id)
-    recruiter_ids = await _client_connected_recruiter_ids(db, client_id)
-    if not recruiter_ids:
-        return own_ids
-    cursor = db.jobs.find({"recruiter_id": {"$in": recruiter_ids}}, {"_id": 1}).limit(1000)
-    recruiter_jobs = await cursor.to_list(length=1000)
-    seen = set(own_ids)
-    for doc in recruiter_jobs:
-        jid = str(doc["_id"])
-        if jid not in seen:
-            seen.add(jid)
-            own_ids.append(jid)
-    return own_ids
+    """All job ids a client may read: own + connected recruiters' jobs.
+
+    With the tenant hierarchy enabled a key account also receives the jobs of
+    every linked sub-client in its subtree. Single clients (or an empty
+    registry) resolve to exactly one id, preserving pre-tenancy behaviour.
+    """
+    ids: List[str] = []
+    seen: set = set()
+    for cid in tenant_registry.visible_client_ids(client_id) or [client_id]:
+        own_ids = await _client_all_job_ids(db, cid)
+        recruiter_ids = await _client_connected_recruiter_ids(db, cid)
+        if recruiter_ids:
+            cursor = db.jobs.find({"recruiter_id": {"$in": recruiter_ids}}, {"_id": 1}).limit(1000)
+            recruiter_jobs = await cursor.to_list(length=1000)
+            for doc in recruiter_jobs:
+                jid = str(doc["_id"])
+                if jid not in own_ids:
+                    own_ids.append(jid)
+        for jid in own_ids:
+            if jid not in seen:
+                seen.add(jid)
+                ids.append(jid)
+    return ids
 
 
 async def _recruiter_all_job_ids_for_dashboard(db, recruiter_id: str) -> List[str]:
@@ -161,12 +183,29 @@ async def resolve_scoped_job_ids(db, scope: Dict[str, Any]) -> Optional[List[str
 
 
 def _audit_scope_filter(scope: Dict[str, Any]) -> Dict[str, Any]:
-    """Restrict audit reads to the caller's governance boundary."""
+    """Restrict audit reads to the caller's governance boundary.
+
+    For client callers with a tenant hierarchy the boundary widens to every
+    visible account in their subtree; a single-account client keeps the exact
+    pre-tenancy filter.
+    """
     if scope.get("scope") == "platform":
         return {"event_type": {"$in": list(AUDIT_EVENT_TYPES)}}
 
     user_id = str(scope.get("user_id") or "")
     role = scope.get("role")
+    visible = [str(v) for v in (scope.get("visible_client_ids") or [user_id]) if str(v)]
+    if role == "client" and len(visible) > 1:
+        labels = [f"client:{cid}" for cid in visible]
+        return {
+            "event_type": {"$in": list(AUDIT_EVENT_TYPES)},
+            "$or": [
+                {"actor.user_id": {"$in": visible}},
+                {"actor.role": role},
+                {f"context.{role}_id": {"$in": visible}},
+                {"context.scope_label": {"$in": labels}},
+            ],
+        }
     return {
         "event_type": {"$in": list(AUDIT_EVENT_TYPES)},
         "$or": [
