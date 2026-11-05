@@ -369,6 +369,16 @@ try:
 except ImportError as e:
     print(f"WARNING: CV builder routes not available: {e}")
 
+# Candidate NDA gate — official template, upload + PyPDF2 auto-verification,
+# admin review fallback, and the enforcement helper used by gated endpoints.
+try:
+    from app.nda import router as nda_router
+
+    app.include_router(nda_router, prefix="/v1")
+    print("NDA gate routes loaded")
+except ImportError as e:
+    print(f"WARNING: NDA gate routes not available: {e}")
+
 # ── Auth dependency resolution ─────────────────────────────────────────────────
 # Must be defined BEFORE any @app route that uses Depends(get_auth).
 if jwt_get_auth is not None:
@@ -517,9 +527,31 @@ app.middleware("http")(rate_limit_middleware)
 @app.middleware("http")
 async def correlation_id_middleware(request: Request, call_next):
     correlation_id = request.headers.get("X-Correlation-ID") or str(uuid.uuid4())
+    # Phase 5D (P0-3): gateway-generated X-Trace-Id (UUIDv4). A client may
+    # supply its own, but it MUST be a valid UUIDv4 — otherwise 400.
+    incoming_trace = (request.headers.get("X-Trace-Id") or "").strip()
+    if incoming_trace:
+        try:
+            from app.lineage_envelope import is_uuid_v4
+
+            if not is_uuid_v4(incoming_trace):
+                return JSONResponse(
+                    status_code=400,
+                    content={"detail": "X-Trace-Id must be a valid UUIDv4"},
+                )
+            trace_id = str(uuid.UUID(incoming_trace)).lower()
+        except Exception:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "X-Trace-Id must be a valid UUIDv4"},
+            )
+    else:
+        trace_id = str(uuid.uuid4())
     request.state.correlation_id = correlation_id
+    request.state.trace_id = trace_id
     response = await call_next(request)
     response.headers["X-Correlation-ID"] = correlation_id
+    response.headers["X-Trace-Id"] = trace_id
     return response
 
 @app.middleware("http")
@@ -5797,6 +5829,9 @@ async def get_candidate_profile(candidate_id: str, auth = Depends(get_auth)):
 @app.put("/v1/candidate/profile/{candidate_id}", tags=["Candidate Portal"])
 async def update_candidate_profile(candidate_id: str, profile_data: CandidateProfileUpdate, auth = Depends(get_auth)):
     """Update Candidate Profile"""
+    from app.nda import enforce_nda_gate
+
+    await enforce_nda_gate(auth)  # NDA gate: profile edits wait for a verified NDA
     try:
         db = await get_mongo_db()
         
@@ -5847,6 +5882,9 @@ async def update_candidate_profile(candidate_id: str, profile_data: CandidatePro
 @app.post("/v1/candidate/apply", tags=["Candidate Portal"])
 async def apply_for_job(application: JobApplication, auth = Depends(get_auth)):
     """Apply for Job"""
+    from app.nda import enforce_nda_gate
+
+    await enforce_nda_gate(auth)  # NDA gate: no applications before a verified NDA
     try:
         db = await get_mongo_db()
         
@@ -6481,6 +6519,12 @@ async def upload_candidate_application_document(
     doc_key = str(document_type or "").strip().lower()
     if doc_key not in DOCUMENT_LABELS:
         raise HTTPException(status_code=400, detail="Invalid document type. Use 'resume' or 'nda'.")
+    # NDA gate: everything except the NDA upload itself waits for a verified
+    # NDA (uploading the NDA is exactly how the candidate unblocks).
+    if doc_key != "nda":
+        from app.nda import enforce_nda_gate
+
+        await enforce_nda_gate(auth)
 
     db = await get_mongo_db()
     app_doc = await db.job_applications.find_one({"_id": ObjectId(application_id)})

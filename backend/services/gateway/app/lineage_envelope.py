@@ -9,6 +9,27 @@ from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
 
 
+def is_uuid_v4(value: Any) -> bool:
+    """True when ``value`` is a parseable UUID version 4 (Phase 5D P0-3)."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        parsed = uuid.UUID(value.strip())
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return parsed.version == 4
+
+
+def require_uuid_v4(value: Any, field: str = "trace_id") -> str:
+    """Return the normalised UUIDv4 string or raise ``ValueError``."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError(f"{field} must be a valid UUIDv4 when supplied")
+    text = str(value).strip()
+    if not is_uuid_v4(text):
+        raise ValueError(f"{field} must be a valid UUIDv4, got '{text[:64]}'")
+    return str(uuid.UUID(text)).lower()
+
+
 class LineageEnvelope(BaseModel):
     origin_system: str
     owning_system: str

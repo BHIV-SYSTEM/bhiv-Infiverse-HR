@@ -52,6 +52,53 @@ def _sso_role(roles) -> str:
     return "candidate"
 
 
+# ---------------------------------------------------------------------------
+# Abhiruchi students registry fallback (Phase 5D concern)
+# ---------------------------------------------------------------------------
+# External, availability-dependent registry lookup used ONLY as a fallback
+# when the identity store has no canonical id for the email.
+#   - ABHIRUCHI_STUDENTS_URL: registry base URL; empty string disables the
+#     fallback entirely (fail soft to the namespaced pravesh:<id> identity).
+#   - 5s timeout, 5-minute per-email cache (no repeated calls during bursts).
+ABHIRUCHI_DEFAULT_URL = "https://abhiruchi.blackholeinfiverse.com/api/students"
+_ABHIRUCHI_CACHE_TTL = 300  # seconds
+_abhiruchi_cache: dict = {}
+
+
+def _abhiruchi_students_url() -> str:
+    url = (os.getenv("ABHIRUCHI_STUDENTS_URL", ABHIRUCHI_DEFAULT_URL) or "").strip()
+    return url
+
+
+async def _abhiruchi_candidate_id(email: str):
+    """Best-effort candidate id from the Abhiruchi registry (cached, tolerant)."""
+    url = _abhiruchi_students_url()
+    if not url or not email:
+        return None
+    key = email.strip().lower()
+    cached = _abhiruchi_cache.get(key)
+    now = time.time()
+    if cached and (now - cached[0]) < _ABHIRUCHI_CACHE_TTL:
+        return cached[1]
+    candidate_id = None
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                data = resp.json()
+                students = data if isinstance(data, list) else data.get("students", [])
+                for s in students:
+                    if (s.get("email") or "").strip().lower() == key:
+                        candidate_id = s.get("candidate_id") or s.get("student_id")
+                        if candidate_id:
+                            break
+    except Exception:
+        candidate_id = None
+    _abhiruchi_cache[key] = (now, candidate_id)
+    return candidate_id
+
+
 @router.post("/exchange", summary="Exchange a valid Pravesh cookie for a local gateway token")
 async def exchange_session(request: Request):
     """
@@ -100,27 +147,22 @@ async def exchange_session(request: Request):
             from app.identity import service as id_service
             store = await id_service.get_identity_store()
             matches = await store.find_by_email_institute(email, None)
-            if matches and matches[0].canonical_candidate_id:
-                candidate_id = matches[0].canonical_candidate_id
+            # Quarantined identities (P1-6) never contribute a canonical id.
+            usable = [
+                m
+                for m in matches
+                if m.canonical_candidate_id
+                and m.canonical_id_status != "QUARANTINED"
+            ]
+            if usable:
+                candidate_id = usable[0].canonical_candidate_id
         except Exception:
             pass
 
         # Fallback to live Abhiruchi students registry if not in store
+        # (env-configurable, 5s timeout, 5-min cache — see _abhiruchi_candidate_id)
         if not candidate_id:
-            try:
-                import httpx
-                async with httpx.AsyncClient(timeout=8.0) as client:
-                    resp = await client.get("https://abhiruchi.blackholeinfiverse.com/api/students")
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        students = data if isinstance(data, list) else data.get("students", [])
-                        for s in students:
-                            if (s.get("email") or "").strip().lower() == email.lower():
-                                candidate_id = s.get("candidate_id") or s.get("student_id")
-                                if candidate_id:
-                                    break
-            except Exception:
-                pass
+            candidate_id = await _abhiruchi_candidate_id(email)
 
     resolved_candidate_id = candidate_id or local_user_id
     now = int(time.time())

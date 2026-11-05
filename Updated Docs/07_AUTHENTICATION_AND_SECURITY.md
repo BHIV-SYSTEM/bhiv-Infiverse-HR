@@ -120,6 +120,67 @@ Endpoints: `/v1/auth/2fa/*` — setup, verify, login, status, disable, backup-co
 - Secrets live in the owner's secure channel (see archived
   `handover/11_CREDENTIALS_REGISTER.md`); the repository stores only placeholders.
 
+### 8.1 Pravesh SSO — Abhiruchi registry fallback
+
+`POST /api/v1/pravesh/exchange` resolves the canonical candidate id in this order:
+Pravesh identity → Sampada identity store (quarantined records excluded) →
+**live Abhiruchi students registry** (last resort, availability-dependent).
+
+- `ABHIRUCHI_STUDENTS_URL` (gateway env): registry URL; default
+  `https://abhiruchi.blackholeinfiverse.com/api/students`; **empty string disables
+  the fallback** (session then falls back to the namespaced `pravesh:<id>` identity).
+- Lookup rules: **5 s timeout**, **5-minute per-email cache**
+  (`routes/pravesh_routes.py::_abhiruchi_candidate_id`), every failure is swallowed
+  (fail soft — SSO still succeeds).
+- Frontend mirror: `VITE_ABHIRUCHI_STUDENTS_URL` (frontend `.env`), same default,
+  empty disables, 5 s `AbortSignal.timeout` (`pages/candidate/Profile.tsx`).
+- The registry is a *linking attribute source only* — it never merges, overwrites
+  or creates identity data.
+
+### 8.2 Identity quarantine (P1-6)
+
+When an authoritative replay supplies a **different** canonical candidate id
+than the one already stored, the identity record is frozen instead of being
+silently resolved:
+
+- Record `canonical_id_status` becomes **`QUARANTINED`** (the stored id is
+  never overwritten), an `identity.ambiguous.v1` event is emitted with honest
+  delivery status (`SIMULATED` unless `IDENTITY_AMBIGUOUS_URL` is configured),
+  and an `identity_quarantine` document is opened.
+- `POST /api/v1/identity/enrolment/publish` returns **409** while quarantined;
+  Pravesh SSO canonical-id resolution skips quarantined records.
+- Service/admin endpoints:
+  `GET /api/v1/identity/quarantine` (list, default `status=open`) and
+  `POST /api/v1/identity/quarantine/{id}/resolve` with
+  `{"resolution": "released" | "confirmed", "note": ...}` — `released`
+  restores the previous canonical status and unblocks publishing;
+  `confirmed` keeps the record quarantined for data remediation.
+
+### 8.3 Candidate NDA gate
+
+New candidates are walled behind a verified NDA (official template → sign +
+stamp → upload → auto-verify → admin fallback):
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `GET /v1/nda/template` | any gateway auth | Official print-ready HTML NDA |
+| `GET /v1/nda/status` | candidate | Status + verification evidence |
+| `POST /v1/nda/upload` | candidate | PDF upload, PyPDF2 auto-verification |
+| `GET /v1/nda/document` | own / admin | Download the on-file NDA |
+| `GET /v1/nda/admin/queue` | service/admin | Awaiting review |
+| `POST /v1/nda/admin/{id}/review` | service/admin | `VERIFIED` / `REJECTED` decision |
+
+- Verdicts: `VERIFIED` (parses + signature/stamp marker + identity match),
+  `NEEDS_REVIEW` (scans or unconfirmed text — admin fallback), `REJECTED`
+  (not a usable PDF). Reasons are machine-readable in `verification.reasons`.
+- **Enforcement** (`enforce_nda_gate`, 403 `NDA_NOT_VERIFIED`):
+  `POST /v1/candidate/apply`, `PUT /v1/candidate/profile/{id}`,
+  `POST /v1/candidate/applications/{id}/documents/{type}` (except the `nda`
+  upload itself) and `POST /api/v1/cv/export`. Frontend wall:
+  `components/NdaGate.tsx` around the whole `/candidate` tree.
+- **Bypasses**: non-candidate roles, demo guest sessions (`guest:*`),
+  `NDA_GATE_ENABLED=false` (kill switch), and unconfigured-database dev mode.
+
 ---
 
 ## 9. Verification Evidence (2026-08-14)

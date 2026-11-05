@@ -2433,4 +2433,87 @@ export const fetchAdminClients = async (
   return response.data
 }
 
+// ---------------------------------------------------------------------------
+// Candidate NDA gate (Phase 5D)
+// ---------------------------------------------------------------------------
+
+export type NdaStatusValue = 'NOT_SUBMITTED' | 'NEEDS_REVIEW' | 'VERIFIED' | 'REJECTED'
+
+export interface NdaVerification {
+  result: NdaStatusValue
+  reasons: string[]
+  method: string
+  checked_at: string
+  admin_override?: NdaStatusValue
+}
+
+export interface NdaStatus {
+  candidate_id: string
+  status: NdaStatusValue
+  gate_passed: boolean
+  verification: NdaVerification | null
+  document: {
+    filename: string
+    content_type: string
+    size_bytes: number
+    uploaded_at: string
+  } | null
+  review: {
+    reviewed_by: string
+    reviewed_at: string
+    decision: string
+    note?: string
+  } | null
+  updated_at: string | null
+}
+
+export interface NdaUploadResult {
+  ok: boolean
+  status: NdaStatusValue
+  gate_passed: boolean
+  verification: NdaVerification
+  document: NdaStatus['document']
+  message: string
+}
+
+export const fetchNdaStatus = async (): Promise<NdaStatus> => {
+  const response = await api.get('/v1/nda/status', { headers: getAuthHeaders() })
+  return response.data
+}
+
+export const uploadNda = async (file: File): Promise<NdaUploadResult> => {
+  const form = new FormData()
+  form.append('file', file)
+  const response = await api.post('/v1/nda/upload', form, {
+    headers: { ...getAuthHeaders(), 'Content-Type': 'multipart/form-data' },
+    timeout: 120000,
+  })
+  return response.data
+}
+
+/**
+ * Open the official NDA template in a new tab (fetched WITH the auth header,
+ * then handed to the tab as a blob URL so "Print / Save as PDF" works).
+ */
+export const openNdaTemplate = async (): Promise<void> => {
+  const response = await api.get('/v1/nda/template', {
+    headers: getAuthHeaders(),
+    responseType: 'text',
+    transformResponse: [(data) => data],
+  })
+  const blob = new Blob([response.data as unknown as string], { type: 'text/html' })
+  const url = URL.createObjectURL(blob)
+  const win = window.open(url, '_blank', 'noopener')
+  if (!win) {
+    // Popup blocked: trigger a download instead so the candidate still gets it.
+    const a = document.createElement('a')
+    a.href = url
+    a.target = '_blank'
+    a.rel = 'noopener'
+    a.click()
+  }
+  // Give the new tab time to load before the object URL is reclaimed.
+  setTimeout(() => URL.revokeObjectURL(url), 60000)
+}
+
 export default api

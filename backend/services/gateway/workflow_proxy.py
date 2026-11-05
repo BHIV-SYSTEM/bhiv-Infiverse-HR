@@ -146,6 +146,57 @@ def _parse_stored_workflow_password(stored: Any) -> Optional[str]:
         return None
 
 
+async def _resolve_candidate_document(auth: dict) -> Optional[Dict[str, Any]]:
+    """Find the local Sampada candidate document for this auth context.
+
+    Phase 5D (P0-2): resolves three identity shapes instead of assuming the
+    JWT user_id is always a MongoDB ObjectId:
+      1. ObjectId-shaped user_id (classic local accounts) -> ``_id`` lookup
+      2. ``pravesh:<uid>`` namespaced SSO identities -> matched by JWT email
+      3. canonical / other non-hex candidate ids -> matched by email first,
+         then by the candidate's own ``id`` / ``candidate_id`` string fields
+
+    Returns ``None`` when no candidate document exists — callers fall back
+    to JWT claims and never crash on identity shape.
+    """
+    from bson import ObjectId
+
+    from app.database import get_mongo_db
+
+    user_id = str(auth.get("user_id") or "").strip()
+    email = (auth.get("email") or "").strip()
+
+    db = await get_mongo_db()
+
+    # 1. Classic local account: user_id is a real ObjectId
+    if user_id and ObjectId.is_valid(user_id):
+        cand = await db.candidates.find_one({"_id": ObjectId(user_id)})
+        if cand:
+            return cand
+
+    # 2. Email match (covers pravesh:<uid> and canonical-id JWTs)
+    if email:
+        cand = await db.candidates.find_one({"email": email})
+        if cand:
+            return cand
+        escaped = "".join(f"\\{c}" if c in ".^$*+?{}[]()|\\" else c for c in email)
+        cand = await db.candidates.find_one(
+            {"email": {"$regex": f"^{escaped}$", "$options": "i"}}
+        )
+        if cand:
+            return cand
+
+    # 3. Canonical / string candidate id stored on the candidate document
+    if user_id:
+        cand = await db.candidates.find_one(
+            {"$or": [{"id": user_id}, {"candidate_id": user_id}]}
+        )
+        if cand:
+            return cand
+
+    return None
+
+
 async def _credentials_for_candidate(auth: dict) -> Tuple[str, str]:
     """
     Resolve Complete-Infiverse login email and password for this request.
@@ -172,23 +223,16 @@ async def _credentials_for_candidate(auth: dict) -> Tuple[str, str]:
     workflow_email = raw_email
     password: Optional[str] = None
 
-    user_id = auth.get("user_id")
-    if user_id:
-        try:
-            from bson import ObjectId
-
-            from app.database import get_mongo_db
-
-            db = await get_mongo_db()
-            oid = ObjectId(str(user_id))
-            cand = await db.candidates.find_one({"_id": oid})
-            if cand:
-                alt = (cand.get("workflow_employee_email") or "").strip()
-                if alt:
-                    workflow_email = alt
-                password = _parse_stored_workflow_password(cand.get("workflow_password"))
-        except Exception as exc:
-            logger.warning("Workflow credentials: candidate lookup failed (%s)", exc)
+    try:
+        cand = await _resolve_candidate_document(auth)
+    except Exception as exc:
+        logger.warning("Workflow credentials: candidate lookup failed (%s)", exc)
+        cand = None
+    if cand:
+        alt = (cand.get("workflow_employee_email") or "").strip()
+        if alt:
+            workflow_email = alt
+        password = _parse_stored_workflow_password(cand.get("workflow_password"))
 
     if not password:
         password = WORKFLOW_USER_PASSWORD or None
@@ -459,12 +503,7 @@ async def workflow_link_status(auth: dict = Depends(get_candidate_auth)):
     workflow_employee_email: Optional[str] = None
     if user_id:
         try:
-            from bson import ObjectId
-
-            from app.database import get_mongo_db
-
-            db = await get_mongo_db()
-            cand = await db.candidates.find_one({"_id": ObjectId(str(user_id))})
+            cand = await _resolve_candidate_document(auth)
             if cand and cand.get("workflow_password"):
                 linked = True
             if cand:
@@ -516,7 +555,28 @@ async def workflow_link_save(body: WorkflowLinkBody, auth: dict = Depends(get_ca
 
     from app.database import get_mongo_db
 
-    oid = ObjectId(str(user_id))
+    try:
+        cand = await _resolve_candidate_document(auth)
+    except Exception as exc:
+        logger.warning("workflow-link: candidate lookup failed (%s)", exc)
+        cand = None
+
+    if cand is not None:
+        target_filter: Dict[str, Any] = {"_id": cand["_id"]}
+    elif ObjectId.is_valid(str(user_id)):
+        # Classic local account with no candidate doc yet: address by _id
+        # (update is a no-op if the document does not exist — same as before).
+        target_filter = {"_id": ObjectId(str(user_id))}
+    else:
+        # pravesh:<uid> / canonical id with no local candidate account.
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "No local candidate account found to link workflow credentials. "
+                "Sign in with a Sampada account first."
+            ),
+        )
+
     db = await get_mongo_db()
 
     set_doc: Dict[str, Any] = {"workflow_password": enc}
@@ -527,7 +587,7 @@ async def workflow_link_save(body: WorkflowLinkBody, auth: dict = Depends(get_ca
     else:
         update["$unset"] = {"workflow_employee_email": ""}
 
-    await db.candidates.update_one({"_id": oid}, update)
+    await db.candidates.update_one(target_filter, update)
     await _clear_workflow_sessions()
 
     return {"ok": True, "workflow_employee_email": resolved}
@@ -547,10 +607,23 @@ async def workflow_link_delete(auth: dict = Depends(get_candidate_auth)):
 
     from app.database import get_mongo_db
 
-    oid = ObjectId(str(user_id))
+    try:
+        cand = await _resolve_candidate_document(auth)
+    except Exception as exc:
+        logger.warning("workflow-link-delete: candidate lookup failed (%s)", exc)
+        cand = None
+
+    if cand is not None:
+        target_filter = {"_id": cand["_id"]}
+    elif ObjectId.is_valid(str(user_id)):
+        target_filter = {"_id": ObjectId(str(user_id))}
+    else:
+        # No local candidate account => nothing stored to delete (idempotent).
+        return {"ok": True}
+
     db = await get_mongo_db()
     await db.candidates.update_one(
-        {"_id": oid},
+        target_filter,
         {"$unset": {"workflow_password": "", "workflow_employee_email": ""}},
     )
     await _clear_workflow_sessions()

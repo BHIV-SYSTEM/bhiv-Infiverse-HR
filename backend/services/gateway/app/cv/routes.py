@@ -310,6 +310,12 @@ async def export_cv(
     auth: dict = Depends(get_auth),
     store=Depends(service.get_cv_store),
 ):
+    # NDA gate (Phase 5D): candidates export CVs only with a verified NDA.
+    # Recruiters/admins exporting their own drafts are unaffected.
+    from app.nda import enforce_nda_gate
+
+    await enforce_nda_gate(auth)
+
     uid = _owner(auth)
     doc = await store.get(body.draft_id, uid)
     if doc is None:

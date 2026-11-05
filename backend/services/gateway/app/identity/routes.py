@@ -6,6 +6,8 @@ Mounted by the gateway at ``/api/v1`` (see app/main.py).
 Auth model:
 * ``/identity/abhiruchi/intake`` — service-to-service (API key), because only
   the intake system performs handoffs.
+* ``/identity/enrolment/publish`` — API key OR platform admin (Phase 5D P0-5);
+  ordinary authenticated users can no longer trigger delivery.
 * everything else — normal gateway auth (``get_auth``), i.e. an authenticated
   user or service. Reads are read-only.
 """
@@ -22,15 +24,18 @@ _gateway_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 if _gateway_dir not in sys.path:
     sys.path.insert(0, _gateway_dir)
 
-from jwt_auth import get_api_key, get_auth  # noqa: E402
+from jwt_auth import get_api_key, get_auth, get_service_or_admin_auth  # noqa: E402
 
 from app.identity.models import (  # noqa: E402
+    CANONICAL_ID_QUARANTINED,
     INSTITUTE_CODES,
     AbhiruchiIntakeRequest,
     EnrolmentPublishRequest,
     IntakeResponse,
+    QuarantineResolveRequest,
 )
 from app.identity import service  # noqa: E402
+from app.lineage_envelope import is_uuid_v4  # noqa: E402
 
 import httpx  # noqa: E402
 
@@ -84,6 +89,10 @@ async def abhiruchi_intake(
     if not body.canonical_candidate_id and body.candidate_id:
         body.canonical_candidate_id = body.candidate_id.strip() or None
 
+    # Phase 5D (P0-3): a supplied trace_id must be a valid UUIDv4.
+    if body.trace_id and not is_uuid_v4(body.trace_id):
+        raise HTTPException(status_code=422, detail="trace_id must be a valid UUIDv4")
+
     try:
         result = await service.process_intake(body, await _store())
     except ValueError as exc:
@@ -129,7 +138,10 @@ async def get_candidate(
 )
 async def publish_enrolment(
     body: EnrolmentPublishRequest,
-    auth: dict = Depends(get_auth),
+    request: Request,
+    # Phase 5D (P0-5): service-to-service (API key) OR platform admin only —
+    # ordinary candidates/recruiters/clients can no longer trigger publish.
+    auth: dict = Depends(get_service_or_admin_auth),
     store=Depends(_store),
 ):
     """
@@ -142,11 +154,26 @@ async def publish_enrolment(
       SIMULATED is NEVER to be reported as LIVE.
     * ``FAILED``   — delivery attempted and rejected/errored.
     """
+    # Phase 5D (P0-3): supplied trace_id must be UUIDv4; the gateway's own
+    # X-Trace-Id (UUIDv4) is propagated outbound on delivery.
+    if body.trace_id and not is_uuid_v4(body.trace_id):
+        raise HTTPException(status_code=422, detail="trace_id must be a valid UUIDv4")
+    gateway_trace_id = (getattr(request.state, "trace_id", "") or "").strip() or None
+
     record = await store.get_by_local_id(body.sampada_local_id)
     if record is None:
         record = await store.get_by_canonical_id(body.sampada_local_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Identity record not found")
+    # Phase 5D (P1-6): quarantined identities never publish downstream.
+    if record.canonical_id_status == CANONICAL_ID_QUARANTINED:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Identity is quarantined pending review (identity.ambiguous.v1) "
+                "— enrolment publishing is blocked until an admin resolves it."
+            ),
+        )
 
     envelope = service.build_enrolment_envelope(
         record, trace_id=body.trace_id, cohort_id=body.cohort_id
@@ -167,6 +194,8 @@ async def publish_enrolment(
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["X-API-Key"] = api_key
+        if gateway_trace_id:
+            headers["X-Trace-Id"] = gateway_trace_id
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(target, json=payload, headers=headers)
@@ -202,3 +231,74 @@ async def get_enrolment(
     if payload is None:
         raise HTTPException(status_code=404, detail="Envelope not found")
     return {"envelope": payload, "storage_mode": store.mode}
+
+
+# ---------------------------------------------------------------------------
+# Identity quarantine (Phase 5D P1-6)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/quarantine", summary="List identity quarantines (open by default)")
+async def list_quarantines(
+    status: Optional[str] = None,
+    auth: dict = Depends(get_service_or_admin_auth),
+    store=Depends(_store),
+):
+    """Service/admin view of ``identity_quarantine`` docs (default: open)."""
+    docs = await store.list_quarantines(status or "open")
+    return {"quarantines": docs, "storage_mode": store.mode, "read_only": True}
+
+
+@router.post(
+    "/quarantine/{quarantine_id}/resolve",
+    summary="Resolve an identity quarantine (release or confirm)",
+)
+async def resolve_quarantine(
+    quarantine_id: str,
+    body: QuarantineResolveRequest,
+    auth: dict = Depends(get_service_or_admin_auth),
+    store=Depends(_store),
+):
+    """Admin resolution.
+
+    * ``released``  — ambiguity resolved; restores the record's previous
+      canonical-id status and closes the quarantine.
+    * ``confirmed`` — ambiguity confirmed; the record STAYS quarantined
+      for manual data remediation.
+    """
+    resolution = (body.resolution or "").strip().lower()
+    if resolution not in ("released", "confirmed"):
+        raise HTTPException(
+            status_code=422,
+            detail="resolution must be 'released' or 'confirmed'",
+        )
+
+    doc = await store.get_quarantine(quarantine_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Quarantine not found")
+    if doc.get("status") != "open":
+        raise HTTPException(status_code=409, detail="Quarantine is already resolved")
+
+    local_id = (doc.get("record") or {}).get("sampada_local_id") or ""
+    record = await store.get_by_local_id(local_id) if local_id else None
+
+    if resolution == "released" and record is not None:
+        previous = doc.get("previous_canonical_id_status") or "UNKNOWN"
+        record.canonical_id_status = previous
+        await store.save_record(record)
+
+    doc["status"] = "closed"
+    doc["resolution"] = resolution
+    doc["resolved_by"] = body.resolved_by or str(auth.get("user_id") or "")
+    doc["resolved_at"] = service.utc_now_iso()
+    if body.note:
+        doc["resolution_note"] = str(body.note)[:500]
+    await store.save_quarantine(doc)
+
+    return {
+        "ok": True,
+        "quarantine_id": quarantine_id,
+        "resolution": resolution,
+        "record_status": record.canonical_id_status if record else None,
+        "storage_mode": store.mode,
+    }

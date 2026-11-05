@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
-from app.lineage_envelope import LineageEnvelope, attach_lineage
+from app.lineage_envelope import LineageEnvelope, attach_lineage, is_uuid_v4
 from app.workforce_common import GOVERNANCE_AUDIT_EVENT, new_correlation_id, serialize_doc, tenant_id_for_scope, write_workforce_audit
 
 SIGNAL_TYPES = frozenset({"niyantran_telemetry", "artha_payroll_visibility", "crm_participation", "setu_aggregation"})
@@ -38,6 +38,9 @@ async def ingest_setu_signal(db, body: SetuSignalIngest, scope, signal_type: Opt
     st = signal_type or body.signal_type
     if st not in SIGNAL_TYPES:
         raise HTTPException(status_code=422, detail=f"signal_type must be one of: {sorted(SIGNAL_TYPES)}")
+    # Phase 5D (P0-3): a supplied trace_id must be a valid UUIDv4.
+    if body.trace_id and not is_uuid_v4(body.trace_id):
+        raise HTTPException(status_code=422, detail="trace_id must be a valid UUIDv4")
     cid = body.correlation_id or new_correlation_id()
     owner = body.owning_system or OWNERSHIP_BY_TYPE.get(st, "unknown")
     origin = body.origin_system or owner

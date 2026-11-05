@@ -9,7 +9,7 @@ contract version is agreed).
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -22,11 +22,22 @@ INSTITUTE_CODES = ("MSSU", "DYP-A", "SIT-S", "SIPS-S", "VJTI")
 INSTITUTE_ALIASES = {"RTMSSU": "MSSU", "RTM-MSSU": "MSSU"}
 
 # Canonical-id status vocabulary — no new statuses invented.
-# VERIFIED   : authoritative source supplied the canonical candidate_id
-# UNKNOWN    : no canonical id yet (Sampada does NOT invent one)
+# VERIFIED     : authoritative source supplied the canonical candidate_id
+# UNKNOWN      : no canonical id yet (Sampada does NOT invent one)
+# QUARANTINED  : conflicting authoritative evidence detected — the identity
+#                is frozen for manual review (Phase 5D P1-6). Quarantined
+#                records never publish enrolment until resolved.
 CANONICAL_ID_VERIFIED = "VERIFIED"
 CANONICAL_ID_UNKNOWN = "UNKNOWN"
-CANONICAL_ID_STATUSES = (CANONICAL_ID_VERIFIED, CANONICAL_ID_UNKNOWN)
+CANONICAL_ID_QUARANTINED = "QUARANTINED"
+CANONICAL_ID_STATUSES = (
+    CANONICAL_ID_VERIFIED,
+    CANONICAL_ID_UNKNOWN,
+    CANONICAL_ID_QUARANTINED,
+)
+
+# Ambiguous-identity event contract (Phase 5D P1-6).
+IDENTITY_AMBIGUOUS_EVENT = "identity.ambiguous.v1"
 
 
 def utc_now_iso() -> str:
@@ -125,6 +136,22 @@ class IntakeResponse(BaseModel):
     warnings: List[str] = []
     storage_mode: str = "memory"
     trace_id: Optional[str] = None
+    # Present when this intake triggered an identity quarantine (P1-6).
+    quarantine: Optional[Dict[str, Any]] = None
+
+
+class QuarantineResolveRequest(BaseModel):
+    """Admin resolution of an open identity quarantine (P1-6).
+
+    released — ambiguity resolved; the record returns to its previous
+               canonical-id status (VERIFIED/UNKNOWN).
+    confirmed — ambiguity confirmed; the record STAYS quarantined for
+                manual data remediation.
+    """
+
+    resolution: str  # "released" | "confirmed"
+    note: Optional[str] = None
+    resolved_by: Optional[str] = None
 
 
 class EnrolmentCandidate(BaseModel):

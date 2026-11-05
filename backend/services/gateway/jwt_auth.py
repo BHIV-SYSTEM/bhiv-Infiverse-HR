@@ -252,6 +252,28 @@ def auth_dependency(
     return get_auth(credentials, request)
 
 
+def get_service_or_admin_auth(
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    request: Request = None,
+):
+    """Phase 5D (P0-5): service-to-service OR platform-admin authorization.
+
+    Accepts an API key (``type == "api_key"``) or a JWT whose role is exactly
+    ``admin``. Candidates, recruiters, clients and Pravesh SSO identities are
+    rejected with 403 — they must never trigger service-level operations such
+    as enrolment publishing.
+    """
+    auth = get_auth(credentials, request)
+    if auth.get("type") == "api_key":
+        return auth
+    if str(auth.get("role") or "").strip() == "admin":
+        return auth
+    raise HTTPException(
+        status_code=403,
+        detail="Service or platform-admin access required",
+    )
+
+
 def require_role(*allowed_roles: str):
     """
     Dependency factory to require specific roles.

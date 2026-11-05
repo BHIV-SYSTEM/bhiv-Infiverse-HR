@@ -8,6 +8,7 @@ import AdminTenantsPage from './pages/admin/AdminTenantsPage'
 import { ThemeProvider } from './context/ThemeContext'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import ProtectedRoute, { PublicRoute } from './components/ProtectedRoute'
+import NdaGate from './components/NdaGate'
 
 // Layouts
 import CandidateLayout from './components/layouts/CandidateLayout'
@@ -124,10 +125,14 @@ function App() {
                 }
               />
 
-              {/* Candidate Routes - Protected for 'candidate' role only */}
+              {/* Candidate Routes - Protected for 'candidate' role only.
+                  NdaGate walls the whole candidate tree until the uploaded
+                  NDA is VERIFIED (guests bypass; backend gates too). */}
               <Route path="/candidate" element={
                 <ProtectedRoute allowedRoles={['candidate']}>
-                  <CandidateLayout />
+                  <NdaGate>
+                    <CandidateLayout />
+                  </NdaGate>
                 </ProtectedRoute>
               }>
                 <Route index element={<Navigate to="/candidate/dashboard" replace />} />

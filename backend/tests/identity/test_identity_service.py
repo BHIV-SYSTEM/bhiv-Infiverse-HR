@@ -514,22 +514,35 @@ def test_publish_dry_run_is_simulated_never_live(api_client):
     ).json()
     local_id = created["record"]["sampada_local_id"]
 
+    # Phase 5D (P0-3): trace_id must be a valid UUIDv4 when supplied.
+    import uuid as _uuid
+
+    good_trace = str(_uuid.uuid4())
     resp = api_client.post(
         "/api/v1/identity/enrolment/publish",
-        json={"sampada_local_id": local_id, "dry_run": True, "trace_id": "trace-t2-1"},
+        json={"sampada_local_id": local_id, "dry_run": True, "trace_id": good_trace},
         headers=AUTH,
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["delivery"] == "SIMULATED"  # honest status — not LIVE
     assert body["envelope"]["event"] == "candidate.enrolment.v1"
-    assert body["envelope"]["trace_id"] == "trace-t2-1"
+    assert body["envelope"]["trace_id"] == good_trace
 
     # Stored envelope can be retrieved by its idempotency key
     key = body["envelope"]["idempotency_key"]
     got = api_client.get(f"/api/v1/identity/enrolment/{key}", headers=AUTH)
     assert got.status_code == 200
     assert got.json()["envelope"]["idempotency_key"] == key
+
+    # Non-UUIDv4 trace_id is rejected (P0-3)
+    bad = api_client.post(
+        "/api/v1/identity/enrolment/publish",
+        json={"sampada_local_id": local_id, "dry_run": True, "trace_id": "trace-t2-1"},
+        headers=AUTH,
+    )
+    assert bad.status_code == 422
+    assert "UUIDv4" in bad.json()["detail"]
 
 
 def test_publish_unknown_candidate_404(api_client):
@@ -546,3 +559,179 @@ def test_institutes_endpoint_lists_agreed_codes(api_client):
     assert resp.status_code == 200
     assert set(resp.json()["institute_codes"]) == set(INSTITUTE_CODES)
     assert resp.json()["aliases"]["RTMSSU"] == "MSSU"
+
+
+# ---------------------------------------------------------------------------
+# Identity quarantine (Phase 5D P1-6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_canonical_conflict_quarantines_record(store):
+    """Conflicting authoritative canonical ids freeze the identity."""
+    await service.process_intake(
+        intake(source_reference="ABH-Q-1", canonical_candidate_id="cc_one"), store
+    )
+    result = await service.process_intake(
+        intake(source_reference="ABH-Q-1", canonical_candidate_id="cc_two"), store
+    )
+    rec = result["record"]
+    # The persisted canonical id is never overwritten...
+    assert rec.canonical_candidate_id == "cc_one"
+    # ...but the record is frozen for review.
+    assert rec.canonical_id_status == "QUARANTINED"
+    assert result["quarantine"] is not None
+    assert result["quarantine"]["status"] == "open"
+    assert result["quarantine"]["event"]["event"] == "identity.ambiguous.v1"
+    # Honest delivery: no webhook configured => SIMULATED, never LIVE.
+    assert result["quarantine"]["event"]["delivery"] == "SIMULATED"
+    assert any("quarantined" in w for w in result["warnings"])
+
+    quarantines = await store.list_quarantines("open")
+    assert len(quarantines) == 1
+    assert quarantines[0]["previous_canonical_id_status"] == "VERIFIED"
+
+
+@pytest.mark.asyncio
+async def test_quarantined_record_stays_quarantined_on_further_replay(store):
+    await service.process_intake(
+        intake(source_reference="ABH-Q-2", canonical_candidate_id="cc_one"), store
+    )
+    await service.process_intake(
+        intake(source_reference="ABH-Q-2", canonical_candidate_id="cc_two"), store
+    )
+    # A later replay WITHOUT a conflicting id must not silently unfreeze it.
+    again = await service.process_intake(
+        intake(source_reference="ABH-Q-2", canonical_candidate_id="cc_one"), store
+    )
+    assert again["record"].canonical_id_status == "QUARANTINED"
+
+
+def test_quarantine_publish_blocked_409(api_client):
+    # Create a conflicting-identity record through the API.
+    api_client.post(
+        "/api/v1/identity/abhiruchi/intake",
+        json=institute_payload(source_reference="ABH-Q-3", canonical_candidate_id="cc_q1"),
+        headers=AUTH,
+    )
+    conflicted = api_client.post(
+        "/api/v1/identity/abhiruchi/intake",
+        json=institute_payload(source_reference="ABH-Q-3", canonical_candidate_id="cc_q2"),
+        headers=AUTH,
+    ).json()
+    assert conflicted["record"]["canonical_id_status"] == "QUARANTINED"
+    local_id = conflicted["record"]["sampada_local_id"]
+
+    resp = api_client.post(
+        "/api/v1/identity/enrolment/publish",
+        json={"sampada_local_id": local_id, "dry_run": True},
+        headers=AUTH,
+    )
+    assert resp.status_code == 409
+    assert "quarantined" in resp.json()["detail"].lower()
+
+
+def test_quarantine_list_and_resolve_released(api_client):
+    api_client.post(
+        "/api/v1/identity/abhiruchi/intake",
+        json=institute_payload(source_reference="ABH-Q-4", canonical_candidate_id="cc_r1"),
+        headers=AUTH,
+    )
+    conflicted = api_client.post(
+        "/api/v1/identity/abhiruchi/intake",
+        json=institute_payload(source_reference="ABH-Q-4", canonical_candidate_id="cc_r2"),
+        headers=AUTH,
+    ).json()
+    local_id = conflicted["record"]["sampada_local_id"]
+
+    listed = api_client.get("/api/v1/identity/quarantine", headers=AUTH)
+    assert listed.status_code == 200
+    docs = listed.json()["quarantines"]
+    assert len(docs) == 1
+    qid = docs[0]["quarantine_id"]
+    assert docs[0]["event"]["event"] == "identity.ambiguous.v1"
+
+    # Release restores the previous canonical status and unblocks publishing.
+    resolved = api_client.post(
+        f"/api/v1/identity/quarantine/{qid}/resolve",
+        json={"resolution": "released", "note": "verified with source", "resolved_by": "admin-test"},
+        headers=AUTH,
+    )
+    assert resolved.status_code == 200, resolved.text
+    assert resolved.json()["resolution"] == "released"
+    assert resolved.json()["record_status"] == "VERIFIED"
+
+    publish = api_client.post(
+        "/api/v1/identity/enrolment/publish",
+        json={"sampada_local_id": local_id, "dry_run": True},
+        headers=AUTH,
+    )
+    assert publish.status_code == 200
+
+    # Second resolve is rejected (already closed).
+    again = api_client.post(
+        f"/api/v1/identity/quarantine/{qid}/resolve",
+        json={"resolution": "released"},
+        headers=AUTH,
+    )
+    assert again.status_code == 409
+
+
+def test_quarantine_confirm_keeps_record_quarantined(api_client):
+    api_client.post(
+        "/api/v1/identity/abhiruchi/intake",
+        json=institute_payload(source_reference="ABH-Q-5", canonical_candidate_id="cc_c1"),
+        headers=AUTH,
+    )
+    conflicted = api_client.post(
+        "/api/v1/identity/abhiruchi/intake",
+        json=institute_payload(source_reference="ABH-Q-5", canonical_candidate_id="cc_c2"),
+        headers=AUTH,
+    ).json()
+    local_id = conflicted["record"]["sampada_local_id"]
+    qid = api_client.get("/api/v1/identity/quarantine", headers=AUTH).json()["quarantines"][0][
+        "quarantine_id"
+    ]
+
+    resolved = api_client.post(
+        f"/api/v1/identity/quarantine/{qid}/resolve",
+        json={"resolution": "confirmed", "note": "real duplicate — needs data fix"},
+        headers=AUTH,
+    )
+    assert resolved.status_code == 200
+    assert resolved.json()["record_status"] == "QUARANTINED"
+
+    publish = api_client.post(
+        "/api/v1/identity/enrolment/publish",
+        json={"sampada_local_id": local_id, "dry_run": True},
+        headers=AUTH,
+    )
+    assert publish.status_code == 409
+
+
+def test_quarantine_requires_service_or_admin(api_client, monkeypatch):
+    """A plain candidate JWT gets 403 on quarantine endpoints (P1-6)."""
+    import time
+
+    import jwt as pyjwt
+
+    import jwt_auth
+
+    candidate_secret = "quarantine-test-candidate-secret"
+    monkeypatch.setattr(jwt_auth, "CANDIDATE_JWT_SECRET_KEY", candidate_secret)
+    token = pyjwt.encode(
+        {
+            "sub": "cand-1",
+            "user_id": "cand-1",
+            "email": "cand@example.com",
+            "role": "candidate",
+            "exp": int(time.time()) + 3600,
+        },
+        candidate_secret,
+        algorithm="HS256",
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+
+    resp = api_client.get("/api/v1/identity/quarantine", headers=headers)
+    assert resp.status_code == 403
+    assert "service or platform-admin" in resp.json()["detail"].lower()

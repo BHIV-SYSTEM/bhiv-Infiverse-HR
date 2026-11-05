@@ -21,6 +21,7 @@ presented as LIVE.
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -31,8 +32,10 @@ except ImportError:  # pragma: no cover - pymongo always present with motor
         """Stand-in so a Mongo-less environment still imports cleanly."""
 
 from .models import (
+    CANONICAL_ID_QUARANTINED,
     CANONICAL_ID_UNKNOWN,
     CANONICAL_ID_VERIFIED,
+    IDENTITY_AMBIGUOUS_EVENT,
     AbhiruchiIntakeRequest,
     EnrolmentCandidate,
     EnrolmentEnvelope,
@@ -68,6 +71,7 @@ class InMemoryIdentityStore:
     def __init__(self) -> None:
         self._records: Dict[str, IdentityRecord] = {}
         self._enrolments: Dict[str, Dict[str, Any]] = {}
+        self._quarantines: Dict[str, Dict[str, Any]] = {}
 
     async def get_by_local_id(self, local_id: str) -> Optional[IdentityRecord]:
         return self._records.get(local_id)
@@ -111,6 +115,19 @@ class InMemoryIdentityStore:
     async def get_enrolment(self, key: str) -> Optional[Dict[str, Any]]:
         return self._enrolments.get(key)
 
+    async def save_quarantine(self, doc: Dict[str, Any]) -> Dict[str, Any]:
+        self._quarantines[str(doc["quarantine_id"])] = doc
+        return doc
+
+    async def get_quarantine(self, quarantine_id: str) -> Optional[Dict[str, Any]]:
+        return self._quarantines.get(quarantine_id)
+
+    async def list_quarantines(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        docs = list(self._quarantines.values())
+        if status:
+            docs = [d for d in docs if d.get("status") == status]
+        return sorted(docs, key=lambda d: d.get("created_at") or "")
+
 
 class MongoIdentityStore:
     """MongoDB-backed store (``identity`` / ``identity_enrolments``)."""
@@ -119,6 +136,7 @@ class MongoIdentityStore:
 
     RECORDS = "identity"
     ENROLMENTS = "identity_enrolments"
+    QUARANTINES = "identity_quarantine"
 
     def __init__(self, db) -> None:
         self._db = db
@@ -192,6 +210,31 @@ class MongoIdentityStore:
     async def get_enrolment(self, key: str) -> Optional[Dict[str, Any]]:
         doc = await self._db[self.ENROLMENTS].find_one({"idempotency_key": key})
         return doc.get("payload") if doc else None
+
+    async def save_quarantine(self, doc: Dict[str, Any]) -> Dict[str, Any]:
+        await self._db[self.QUARANTINES].update_one(
+            {"quarantine_id": doc["quarantine_id"]},
+            {"$set": doc},
+            upsert=True,
+        )
+        return doc
+
+    async def get_quarantine(self, quarantine_id: str) -> Optional[Dict[str, Any]]:
+        doc = await self._db[self.QUARANTINES].find_one({"quarantine_id": quarantine_id})
+        if doc:
+            doc.pop("_id", None)
+        return doc
+
+    async def list_quarantines(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        query: Dict[str, Any] = {}
+        if status:
+            query["status"] = status
+        docs = await (
+            self._db[self.QUARANTINES].find(query).sort("created_at", 1).to_list(length=200)
+        )
+        for d in docs:
+            d.pop("_id", None)
+        return docs
 
 
 _MEMORY_STORE = InMemoryIdentityStore()
@@ -271,21 +314,27 @@ def _merge_replay(
     record: IdentityRecord,
     institute: Optional[str],
     warnings: List[str],
+    conflicts: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Apply a replayed intake onto an existing record.
 
     Fills only what is missing and never overwrites a persisted value. Any
     conflicting supplied value is reported as a warning — nothing is
-    silently discarded.
+    silently discarded. Identity-critical conflicts (canonical id) are also
+    appended to ``conflicts`` so the caller can quarantine the record
+    (Phase 5D P1-6).
     """
+    if conflicts is None:
+        conflicts = []
     if req.source_reference not in record.source_references:
         record.source_references.append(req.source_reference)
 
     # Fill previously-unknown attributes only; never overwrite a VERIFIED
     # canonical id with a different value.
     if req.canonical_candidate_id and not record.canonical_candidate_id:
-        record.canonical_candidate_id = req.canonical_candidate_id
-        record.canonical_id_status = CANONICAL_ID_VERIFIED
+        if record.canonical_id_status != CANONICAL_ID_QUARANTINED:
+            record.canonical_candidate_id = req.canonical_candidate_id
+            record.canonical_id_status = CANONICAL_ID_VERIFIED
     elif (
         req.canonical_candidate_id
         and record.canonical_candidate_id
@@ -294,6 +343,13 @@ def _merge_replay(
         warnings.append(
             "canonical_candidate_id mismatch with existing record — kept the "
             "existing one; conflicting value not applied"
+        )
+        conflicts.append(
+            {
+                "type": "canonical_id_mismatch",
+                "persisted_canonical_id": record.canonical_candidate_id,
+                "supplied_canonical_id": req.canonical_candidate_id,
+            }
         )
     if req.email:
         if not record.email:
@@ -348,6 +404,93 @@ def _merge_replay(
         record.trace_id = req.trace_id
 
 
+async def quarantine_record(
+    store,
+    record: IdentityRecord,
+    *,
+    reason: str,
+    conflicts: List[Dict[str, Any]],
+    trace_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Freeze an identity with conflicting authoritative evidence (P1-6).
+
+    Sets ``canonical_id_status = QUARANTINED`` (never invents/overwrites the
+    canonical id itself), writes a doc to ``identity_quarantine``, and emits
+    an ``identity.ambiguous.v1`` event carrying the same honest delivery
+    semantics as enrolment (stored first; optional outbound webhook).
+    """
+    previous_status = record.canonical_id_status
+    if record.canonical_id_status != CANONICAL_ID_QUARANTINED:
+        record.canonical_id_status = CANONICAL_ID_QUARANTINED
+        await store.save_record(record)
+
+    quarantine_id = f"qtn-{uuid.uuid4().hex[:16]}"
+    event = {
+        "event": IDENTITY_AMBIGUOUS_EVENT,
+        "schema_version": "1.0",
+        "quarantine_id": quarantine_id,
+        "sampada_local_id": record.sampada_local_id,
+        "canonical_candidate_id": record.canonical_candidate_id,
+        "email_linking_attribute": record.email,
+        "institute_code": record.institute_code,
+        "reason": reason,
+        "conflicts": conflicts,
+        "detected_at": utc_now_iso(),
+        "trace_id": trace_id or record.trace_id,
+        "merge_policy": "email_is_linking_attribute_only",
+    }
+
+    delivery = "SIMULATED"
+    detail = "IDENTITY_AMBIGUOUS_URL not configured — event stored, not delivered"
+    target = (os.getenv("IDENTITY_AMBIGUOUS_URL") or "").strip()
+    if target:
+        try:
+            import httpx
+
+            headers = {"Content-Type": "application/json"}
+            api_key = (os.getenv("IDENTITY_AMBIGUOUS_API_KEY") or "").strip()
+            if api_key:
+                headers["X-API-Key"] = api_key
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.post(target, json=event, headers=headers)
+            if 200 <= resp.status_code < 300:
+                delivery = "LIVE"
+                detail = f"accepted ({resp.status_code})"
+            else:
+                delivery = "FAILED"
+                detail = f"webhook responded {resp.status_code}"
+        except Exception as exc:  # honest failure — never fake LIVE
+            delivery = "FAILED"
+            detail = f"delivery error: {exc}"
+    event["delivery"] = delivery
+    event["delivery_detail"] = detail
+
+    doc = {
+        "quarantine_id": quarantine_id,
+        "status": "open",
+        "reason": reason,
+        "conflicts": conflicts,
+        "previous_canonical_id_status": previous_status,
+        "record": {
+            "sampada_local_id": record.sampada_local_id,
+            "canonical_candidate_id": record.canonical_candidate_id,
+            "email": record.email,
+            "institute_code": record.institute_code,
+        },
+        "event": event,
+        "created_at": utc_now_iso(),
+    }
+    await store.save_quarantine(doc)
+    logger.warning(
+        "[IDENTITY] quarantine %s for %s: %s (event delivery=%s)",
+        quarantine_id,
+        record.sampada_local_id,
+        reason,
+        delivery,
+    )
+    return doc
+
+
 async def process_intake(
     req: AbhiruchiIntakeRequest, store
 ) -> Dict[str, Any]:
@@ -357,6 +500,8 @@ async def process_intake(
     1. authoritative ``canonical_candidate_id`` (reuse that record)
     2. same ``(source_system, source_reference)`` (retry / replay — reuse)
     3. otherwise create a NEW Sampada-local record (canonical id stays UNKNOWN)
+
+    Identity-critical replay conflicts quarantine the record (P1-6).
     """
     institute = normalise_institute_code(req.institute_code)
     # Trim/validate free-text passthrough; empty becomes None (never invented).
@@ -364,6 +509,7 @@ async def process_intake(
     branch = _clean_optional(req.branch, "branch")
     campus = _clean_optional(req.campus, "campus")
     warnings: List[str] = []
+    conflicts: List[Dict[str, Any]] = []
 
     record: Optional[IdentityRecord] = None
     status = "created"
@@ -378,7 +524,7 @@ async def process_intake(
         status = "reused"
         # Carry cleaned values so the replay merge sees them.
         req.university, req.branch, req.campus = university, branch, campus
-        _merge_replay(req, record, institute, warnings)
+        _merge_replay(req, record, institute, warnings, conflicts)
     else:
         record = IdentityRecord(
             sampada_local_id=new_local_id(),
@@ -445,9 +591,27 @@ async def process_intake(
             "record; no duplicate candidate created"
         )
         req.university, req.branch, req.campus = university, branch, campus
-        _merge_replay(req, winner, institute, warnings)
+        _merge_replay(req, winner, institute, warnings, conflicts)
         record = winner
         await store.save_record(record)
+
+    # Phase 5D (P1-6): identity-critical replay conflicts freeze the record.
+    quarantine_doc: Optional[Dict[str, Any]] = None
+    if conflicts:
+        quarantine_doc = await quarantine_record(
+            store,
+            record,
+            reason=(
+                "conflicting authoritative evidence on replay: "
+                + ", ".join(sorted({c.get("type", "unknown") for c in conflicts}))
+            ),
+            conflicts=conflicts,
+            trace_id=req.trace_id,
+        )
+        warnings.append(
+            "identity quarantined for manual review (identity.ambiguous.v1) — "
+            "enrolment publishing is blocked until resolved"
+        )
 
     return {
         "status": status,
@@ -455,6 +619,7 @@ async def process_intake(
         "warnings": warnings,
         "storage_mode": store.mode,
         "trace_id": req.trace_id,
+        "quarantine": quarantine_doc,
     }
 
 

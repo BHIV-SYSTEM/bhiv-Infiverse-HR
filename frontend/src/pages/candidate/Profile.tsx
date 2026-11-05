@@ -183,11 +183,13 @@ export default function CandidateProfile() {
         }
       }
 
-      // Authoritative fallback: Query Abhiruchi candidate registry by email
-      if (!foundRecord && email) {
+      // Authoritative fallback: Query Abhiruchi candidate registry by email.
+      // URL is env-configurable (VITE_ABHIRUCHI_STUDENTS_URL); empty disables it.
+      const abhiruchiUrl = (import.meta.env.VITE_ABHIRUCHI_STUDENTS_URL ??
+        'https://abhiruchi.blackholeinfiverse.com/api/students').trim()
+      if (!foundRecord && email && abhiruchiUrl) {
         try {
-          const abhiruchiUrl = 'https://abhiruchi.blackholeinfiverse.com/api/students'
-          const res = await fetch(abhiruchiUrl)
+          const res = await fetch(abhiruchiUrl, { signal: AbortSignal.timeout(5000) })
           if (res.ok) {
             const data = await res.json()
             const list = Array.isArray(data) ? data : (data.students || data.data || [])

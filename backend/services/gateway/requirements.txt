@@ -1,7 +1,9 @@
-# Gateway Service - Python 3.12.7 Compatible Requirements
-fastapi>=0.104.0,<0.120.0
-uvicorn[standard]>=0.24.0,<0.30.0
-starlette>=0.27.0,<0.40.0
+# Gateway Service - Python 3.12 Compatible Requirements
+# Phase 5D (P0-4): pins aligned with the verified runtime so
+# `pip install -r requirements.txt` resolves without starlette/httpx conflicts.
+fastapi>=0.118.0,<1.0.0
+uvicorn[standard]>=0.24.0,<1.0.0
+starlette>=0.40.0,<2.0.0
 pydantic>=2.5.0,<3.0.0
 
 # Database dependencies - MongoDB (Async Motor for FastAPI)
@@ -18,23 +20,23 @@ dnspython>=2.4.0  # For MongoDB Atlas SRV connections
 python-jose[cryptography]>=3.3.0,<4.0.0
 passlib[bcrypt]>=1.7.4,<2.0.0
 pyotp>=2.9.0,<3.0.0
-qrcode[pil]>=7.4.2,<8.0.0
+qrcode[pil]>=7.4.2,<9.0.0
 python-multipart>=0.0.6
-bcrypt>=4.0.1,<5.0.0
+bcrypt>=4.0.1,<6.0.0
 PyJWT>=2.8.0,<3.0.0
-cryptography>=42.0.0,<45.0.0
+cryptography>=42.0.0,<51.0.0
 
 # Monitoring & Metrics - Stable versions
 prometheus-client>=0.19.0,<1.0.0
-psutil>=5.9.6,<6.0.0
+psutil>=5.9.6,<8.0.0
 
 # HTTP & Utilities - Compatible versions
 requests>=2.31.0,<3.0.0
-httpx>=0.25.2,<0.28.0
+httpx>=0.27.0,<0.29.0
 python-dotenv>=1.0.0,<2.0.0
 
 # Image processing for QR codes - Compatible version
-Pillow>=10.0.1,<11.0.0
+Pillow>=10.0.1,<14.0.0
 
 # Redis for caching - Stable version
 redis>=5.0.1,<6.0.0
