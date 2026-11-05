@@ -9,6 +9,7 @@ import { ThemeProvider } from './context/ThemeContext'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import ProtectedRoute, { PublicRoute } from './components/ProtectedRoute'
 import NdaGate from './components/NdaGate'
+import AdminNdaApprovalsPage from './pages/admin/AdminNdaApprovalsPage'
 
 // Layouts
 import CandidateLayout from './components/layouts/CandidateLayout'
@@ -113,6 +114,15 @@ function App() {
                 element={
                   <ProtectedRoute allowedRoles={['admin']}>
                     <AdminTenantsPage />
+                  </ProtectedRoute>
+                }
+              />
+              {/* NDA approvals — manual review fallback for the candidate NDA gate */}
+              <Route
+                path="/admin/ndas"
+                element={
+                  <ProtectedRoute allowedRoles={['admin']}>
+                    <AdminNdaApprovalsPage />
                   </ProtectedRoute>
                 }
               />

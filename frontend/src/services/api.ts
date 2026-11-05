@@ -2516,4 +2516,48 @@ export const openNdaTemplate = async (): Promise<void> => {
   setTimeout(() => URL.revokeObjectURL(url), 60000)
 }
 
+// ---------------------------------------------------------------------------
+// NDA admin review (platform admin panel at /admin/ndas)
+// ---------------------------------------------------------------------------
+
+export interface NdaQueueItem {
+  candidate_id: string
+  status: NdaStatusValue
+  verification: NdaVerification | null
+  filename: string | null
+  size_bytes: number | null
+  uploaded_at: string | null
+  updated_at: string | null
+}
+
+export const fetchNdaAdminQueue = async (): Promise<{
+  queue: NdaQueueItem[]
+  count: number
+}> => {
+  const response = await api.get('/v1/nda/admin/queue', { headers: getAuthHeaders() })
+  return response.data
+}
+
+export const reviewNda = async (
+  candidateId: string,
+  decision: 'VERIFIED' | 'REJECTED',
+  note?: string
+): Promise<{ ok: boolean; status: NdaStatusValue; gate_passed: boolean }> => {
+  const response = await api.post(
+    `/v1/nda/admin/${encodeURIComponent(candidateId)}/review`,
+    { decision, note: note || '' },
+    { headers: getAuthHeaders() }
+  )
+  return response.data
+}
+
+export const fetchNdaDocumentBlob = async (candidateId: string): Promise<Blob> => {
+  const response = await api.get('/v1/nda/document', {
+    params: { candidate_id: candidateId },
+    headers: getAuthHeaders(),
+    responseType: 'blob',
+  })
+  return response.data
+}
+
 export default api

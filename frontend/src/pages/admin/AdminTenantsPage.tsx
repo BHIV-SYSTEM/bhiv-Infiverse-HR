@@ -500,6 +500,12 @@ export default function AdminTenantsPage() {
               Refresh
             </button>
             <button
+              onClick={() => navigate('/admin/ndas')}
+              className="px-3 py-2 rounded-lg bg-emerald-600/15 hover:bg-emerald-600/30 border border-emerald-600/50 text-sm text-emerald-300"
+            >
+              NDA Approvals
+            </button>
+            <button
               onClick={() => navigate('/control')}
               className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm text-gray-300"
             >

@@ -170,6 +170,10 @@ stamp → upload → auto-verify → admin fallback):
 | `GET /v1/nda/admin/queue` | service/admin | Awaiting review |
 | `POST /v1/nda/admin/{id}/review` | service/admin | `VERIFIED` / `REJECTED` decision |
 
+Admin UI: **`/admin/ndas`** ("NDA Approvals" button in the tenant-console
+header, role `admin`) — lists the queue with verification evidence, opens the
+uploaded PDF, and approves/rejects with an optional note.
+
 - Verdicts: `VERIFIED` (parses + signature/stamp marker + identity match),
   `NEEDS_REVIEW` (scans or unconfirmed text — admin fallback), `REJECTED`
   (not a usable PDF). Reasons are machine-readable in `verification.reasons`.
