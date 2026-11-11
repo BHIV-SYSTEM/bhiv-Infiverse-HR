@@ -481,6 +481,134 @@ def test_admin_endpoints_reject_candidates(client, fake_db):
     assert resp.status_code == 403
 
 
+def test_admin_endpoints_reject_pravesh_sso_admin(client, fake_db, monkeypatch):
+    """Audit (CRITICAL): a Pravesh SSO token with roles:["admin"] must never
+    reach NDA admin queue/review or read another candidate's document."""
+    monkeypatch.setenv("PRAVESH_JWT_SECRET", "pravesh-nda-test-secret")
+    token = pyjwt.encode(
+        {
+            "user_id": "bhiv_sso_admin_1",
+            "email": "sso-admin@example.com",
+            "tenant_id": "tenant_default",
+            "roles": ["admin"],
+            "permissions": [],
+            "allowedApps": ["sampada"],
+        },
+        "pravesh-nda-test-secret",
+        algorithm="HS256",
+    )
+    sso = {"X-Pravesh-Token": token}  # no Authorization header
+
+    assert client.get("/v1/nda/admin/queue", headers=sso).status_code == 403
+    assert (
+        client.post(
+            f"/v1/nda/admin/{CANDIDATE_ID}/review",
+            headers=sso,
+            json={"decision": "VERIFIED"},
+        ).status_code
+        == 403
+    )
+    # Cross-candidate document read must not take the admin branch
+    resp = client.get(f"/v1/nda/document?candidate_id={CANDIDATE_ID}", headers=sso)
+    assert resp.status_code == 403
+
+
+def test_admin_endpoints_still_accept_platform_admin_jwt(client, fake_db, monkeypatch):
+    """Positive control: a real platform-admin JWT (JWT_SECRET_KEY) keeps access."""
+    import jwt_auth as _ja
+
+    monkeypatch.setattr(_ja, "JWT_SECRET_KEY", "platform-admin-secret")
+    monkeypatch.setattr(_ja, "CANDIDATE_JWT_SECRET_KEY", "")
+    token = pyjwt.encode(
+        {"user_id": "admin_1", "role": "admin", "email": "admin@example.com"},
+        "platform-admin-secret",
+        algorithm="HS256",
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    assert client.get("/v1/nda/admin/queue", headers=headers).status_code == 200
+
+
+def test_reviewer_payload_field_is_ignored(client, fake_db):
+    """Audit: reviewed_by comes from the authenticated principal only —
+    a spoofed 'reviewer' field in the payload must not stick."""
+    client.post(
+        "/v1/nda/upload",
+        headers=bearer(CANDIDATE_ID),
+        files={"file": ("nda.pdf", make_scan_pdf(), "application/pdf")},
+    )
+    resp = client.post(
+        f"/v1/nda/admin/{CANDIDATE_ID}/review",
+        headers=SERVICE_HEADERS,
+        json={"decision": "VERIFIED", "reviewer": "spoofed-attacker"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["reviewed_by"] == "service"  # api-key principal, not payload
+
+
+# ---------------------------------------------------------------------------
+# 3b. Audit hardening: fail-closed gate + PyPDF2 misconfiguration = 503
+# ---------------------------------------------------------------------------
+
+
+def test_gate_fails_closed_on_db_error_in_production(monkeypatch):
+    """Audit: unexpected DB errors fail CLOSED (503) in staging/production."""
+    import app.database as database_module
+    from app.nda import enforce_nda_gate
+
+    async def _raise():
+        raise RuntimeError("mongo down")
+
+    monkeypatch.setattr(database_module, "get_mongo_db", _raise)
+    monkeypatch.setenv("ENV", "production")
+
+    import pytest as _pytest
+
+    with _pytest.raises(Exception) as exc:
+        import asyncio
+
+        asyncio.run(
+            enforce_nda_gate(
+                {"type": "jwt_token", "role": "candidate", "user_id": CANDIDATE_ID}
+            )
+        )
+    assert getattr(exc.value, "status_code", None) == 503
+
+
+def test_gate_still_fails_open_without_database_in_dev(monkeypatch):
+    """No database configured at all (DatabaseNotConfiguredError) = dev mode."""
+    import asyncio
+
+    import app.database as database_module
+    from app.database import DatabaseNotConfiguredError
+    from app.nda import enforce_nda_gate
+
+    async def _raise():
+        raise DatabaseNotConfiguredError("no DATABASE_URL")
+
+    monkeypatch.setattr(database_module, "get_mongo_db", _raise)
+    monkeypatch.delenv("ENV", raising=False)
+    asyncio.run(
+        enforce_nda_gate(
+            {"type": "jwt_token", "role": "candidate", "user_id": CANDIDATE_ID}
+        )
+    )  # must not raise
+
+
+def test_upload_returns_503_when_pypdf2_missing(client, fake_db, monkeypatch):
+    """Audit: a missing PyPDF2 is a 503 misconfiguration — NEVER a silent
+    REJECTED verdict."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "PyPDF2", None)
+    resp = client.post(
+        "/v1/nda/upload",
+        headers=bearer(CANDIDATE_ID),
+        files={"file": ("nda.pdf", make_text_pdf(GOOD_SIGNED_TEXT), "application/pdf")},
+    )
+    assert resp.status_code == 503
+    assert "PyPDF2" in resp.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 # 4. enforce_nda_gate
 # ---------------------------------------------------------------------------

@@ -72,6 +72,7 @@ async def list_institutes(auth: dict = Depends(get_auth)):
 )
 async def abhiruchi_intake(
     body: AbhiruchiIntakeRequest,
+    request: Request,
     _api_key: str = Depends(get_api_key),
 ):
     """
@@ -92,6 +93,14 @@ async def abhiruchi_intake(
     # Phase 5D (P0-3): a supplied trace_id must be a valid UUIDv4.
     if body.trace_id and not is_uuid_v4(body.trace_id):
         raise HTTPException(status_code=422, detail="trace_id must be a valid UUIDv4")
+
+    # Audit: when the client omits trace_id, adopt the gateway's X-Trace-Id
+    # (UUIDv4, set by the correlation middleware) so the stored record and
+    # the request header carry the SAME trace.
+    if not body.trace_id:
+        gateway_trace = (getattr(request.state, "trace_id", "") or "").strip()
+        if gateway_trace and is_uuid_v4(gateway_trace):
+            body.trace_id = gateway_trace
 
     try:
         result = await service.process_intake(body, await _store())
@@ -159,6 +168,11 @@ async def publish_enrolment(
     if body.trace_id and not is_uuid_v4(body.trace_id):
         raise HTTPException(status_code=422, detail="trace_id must be a valid UUIDv4")
     gateway_trace_id = (getattr(request.state, "trace_id", "") or "").strip() or None
+    if gateway_trace_id and not is_uuid_v4(gateway_trace_id):
+        gateway_trace_id = None
+    # Audit: body.trace_id wins; otherwise adopt the gateway header so the
+    # envelope and the X-Trace-Id header can never disagree.
+    effective_trace_id = body.trace_id or gateway_trace_id
 
     record = await store.get_by_local_id(body.sampada_local_id)
     if record is None:
@@ -176,9 +190,11 @@ async def publish_enrolment(
         )
 
     envelope = service.build_enrolment_envelope(
-        record, trace_id=body.trace_id, cohort_id=body.cohort_id
+        record, trace_id=effective_trace_id, cohort_id=body.cohort_id
     )
     payload = envelope.model_dump()
+    # Header must always equal the envelope's trace (audit: no split).
+    outbound_trace_id = envelope.trace_id or None
 
     delivery = "SIMULATED"
     hackaverse_status: Optional[int] = None
@@ -194,8 +210,8 @@ async def publish_enrolment(
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["X-API-Key"] = api_key
-        if gateway_trace_id:
-            headers["X-Trace-Id"] = gateway_trace_id
+        if outbound_trace_id and is_uuid_v4(outbound_trace_id):
+            headers["X-Trace-Id"] = outbound_trace_id
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(target, json=payload, headers=headers)

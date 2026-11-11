@@ -404,6 +404,52 @@ def _merge_replay(
         record.trace_id = req.trace_id
 
 
+def _mask_email(email: Optional[str]) -> Optional[str]:
+    """Partial mask for quarantine artifacts (audit: no raw PII leaks).
+
+    ``student@example.com`` -> ``s***@e***.com`` — enough to correlate,
+    not enough to identify the person.
+    """
+    if not email or "@" not in str(email):
+        return email
+    local, _, domain = str(email).partition("@")
+    local_m = (local[:1] + "***") if local else "***"
+    parts = domain.split(".")
+    if len(parts) >= 2:
+        dom_m = (parts[0][:1] + "***") + "." + ".".join(parts[1:])
+    else:
+        dom_m = domain[:1] + "***"
+    return f"{local_m}@{dom_m}"
+
+
+def _email_sha256(email: Optional[str]) -> Optional[str]:
+    """Correlation hash for masked emails (linking without raw PII)."""
+    if not email:
+        return None
+    import hashlib
+
+    return hashlib.sha256(str(email).strip().lower().encode("utf-8")).hexdigest()
+
+
+def _mask_payload_emails(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Deep-mask every ``email`` field in a payload snapshot."""
+    if not isinstance(payload, dict):
+        return payload
+    out: Dict[str, Any] = {}
+    for key, value in payload.items():
+        if key == "email" and isinstance(value, str) and value:
+            out[key] = _mask_email(value)
+        elif isinstance(value, dict):
+            out[key] = _mask_payload_emails(value)
+        elif isinstance(value, list):
+            out[key] = [
+                _mask_payload_emails(v) if isinstance(v, dict) else v for v in value
+            ]
+        else:
+            out[key] = value
+    return out
+
+
 async def quarantine_record(
     store,
     record: IdentityRecord,
@@ -411,6 +457,7 @@ async def quarantine_record(
     reason: str,
     conflicts: List[Dict[str, Any]],
     trace_id: Optional[str] = None,
+    payload_snapshot: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Freeze an identity with conflicting authoritative evidence (P1-6).
 
@@ -418,20 +465,51 @@ async def quarantine_record(
     canonical id itself), writes a doc to ``identity_quarantine``, and emits
     an ``identity.ambiguous.v1`` event carrying the same honest delivery
     semantics as enrolment (stored first; optional outbound webhook).
+
+    Audit hardening:
+      * ONE open quarantine per ``sampada_local_id`` — repeated conflicts
+        update the existing doc (occurrence_count/conflicts grow) instead of
+        spawning duplicates.
+      * emails are masked + hashed in the event/doc/snapshot (no raw PII).
+      * ``original_payload_snapshot`` preserves the triggering intake payload.
     """
     previous_status = record.canonical_id_status
     if record.canonical_id_status != CANONICAL_ID_QUARANTINED:
         record.canonical_id_status = CANONICAL_ID_QUARANTINED
         await store.save_record(record)
 
-    quarantine_id = f"qtn-{uuid.uuid4().hex[:16]}"
+    # Dedup: reuse the OPEN quarantine for this identity if one exists.
+    existing: Optional[Dict[str, Any]] = None
+    try:
+        for d in await store.list_quarantines("open"):
+            doc_local = str(
+                d.get("sampada_local_id")
+                or (d.get("record") or {}).get("sampada_local_id")
+                or ""
+            )
+            if doc_local == record.sampada_local_id:
+                existing = d
+                break
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("[IDENTITY] quarantine dedup lookup failed: %s", exc)
+
+    if existing:
+        quarantine_id = str(existing.get("quarantine_id") or "")
+        previous_status = existing.get(
+            "previous_canonical_id_status", previous_status
+        )
+    else:
+        quarantine_id = f"qtn-{uuid.uuid4().hex[:16]}"
+
+    masked_email = _mask_email(record.email)
     event = {
         "event": IDENTITY_AMBIGUOUS_EVENT,
         "schema_version": "1.0",
         "quarantine_id": quarantine_id,
         "sampada_local_id": record.sampada_local_id,
         "canonical_candidate_id": record.canonical_candidate_id,
-        "email_linking_attribute": record.email,
+        "email_linking_attribute": masked_email,
+        "email_linking_attribute_sha256": _email_sha256(record.email),
         "institute_code": record.institute_code,
         "reason": reason,
         "conflicts": conflicts,
@@ -465,21 +543,58 @@ async def quarantine_record(
     event["delivery"] = delivery
     event["delivery_detail"] = detail
 
-    doc = {
-        "quarantine_id": quarantine_id,
-        "status": "open",
-        "reason": reason,
-        "conflicts": conflicts,
-        "previous_canonical_id_status": previous_status,
-        "record": {
+    now_iso = utc_now_iso()
+    if existing:
+        # Audit: one OPEN quarantine per identity — grow the existing doc.
+        merged_conflicts = list(existing.get("conflicts") or [])
+        for c in conflicts:
+            if c not in merged_conflicts:
+                merged_conflicts.append(c)
+        doc = dict(existing)
+        doc.update(
+            {
+                "status": "open",
+                "reason": reason,
+                "conflicts": merged_conflicts,
+                "previous_canonical_id_status": previous_status,
+                "record": {
+                    "sampada_local_id": record.sampada_local_id,
+                    "canonical_candidate_id": record.canonical_candidate_id,
+                    "email": masked_email,
+                    "email_sha256": _email_sha256(record.email),
+                    "institute_code": record.institute_code,
+                },
+                "event": event,
+                "occurrence_count": int(existing.get("occurrence_count") or 1) + 1,
+                "last_detected_at": now_iso,
+                "updated_at": now_iso,
+            }
+        )
+        if payload_snapshot is not None and "original_payload_snapshot" not in doc:
+            doc["original_payload_snapshot"] = _mask_payload_emails(payload_snapshot)
+    else:
+        doc = {
+            "quarantine_id": quarantine_id,
             "sampada_local_id": record.sampada_local_id,
-            "canonical_candidate_id": record.canonical_candidate_id,
-            "email": record.email,
-            "institute_code": record.institute_code,
-        },
-        "event": event,
-        "created_at": utc_now_iso(),
-    }
+            "status": "open",
+            "reason": reason,
+            "conflicts": conflicts,
+            "previous_canonical_id_status": previous_status,
+            "occurrence_count": 1,
+            "record": {
+                "sampada_local_id": record.sampada_local_id,
+                "canonical_candidate_id": record.canonical_candidate_id,
+                "email": masked_email,
+                "email_sha256": _email_sha256(record.email),
+                "institute_code": record.institute_code,
+            },
+            "original_payload_snapshot": _mask_payload_emails(payload_snapshot)
+            if payload_snapshot is not None
+            else None,
+            "event": event,
+            "created_at": now_iso,
+            "updated_at": now_iso,
+        }
     await store.save_quarantine(doc)
     logger.warning(
         "[IDENTITY] quarantine %s for %s: %s (event delivery=%s)",
@@ -607,6 +722,8 @@ async def process_intake(
             ),
             conflicts=conflicts,
             trace_id=req.trace_id,
+            # Audit: preserve the triggering intake payload (email masked).
+            payload_snapshot=req.model_dump(),
         )
         warnings.append(
             "identity quarantined for manual review (identity.ambiguous.v1) — "
@@ -632,11 +749,18 @@ def build_enrolment_envelope(
     record: IdentityRecord, trace_id: Optional[str] = None, cohort_id: Optional[str] = None
 ) -> EnrolmentEnvelope:
     """Versioned, idempotent enrolment payload for HackaVerse."""
+    from app.lineage_envelope import is_uuid_v4
+
     cohort = cohort_id or record.cohort_id
     key_source = record.canonical_candidate_id or record.sampada_local_id
     idem = f"{key_source}:{cohort or 'no-cohort'}"
+    # Audit: only UUIDv4 traces leave the gateway (legacy non-UUID traces
+    # stay on the identity record but are never emitted downstream).
+    effective_trace = trace_id or record.trace_id
+    if effective_trace and not is_uuid_v4(str(effective_trace)):
+        effective_trace = None
     return EnrolmentEnvelope(
-        trace_id=trace_id or record.trace_id,
+        trace_id=effective_trace,
         idempotency_key=idem,
         candidate=EnrolmentCandidate(
             canonical_candidate_id=record.canonical_candidate_id,

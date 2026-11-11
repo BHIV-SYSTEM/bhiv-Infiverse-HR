@@ -426,8 +426,12 @@ API_SECRET = "identity-test-secret"
 
 @pytest.fixture()
 def api_client(monkeypatch, store):
+    import re
+    import uuid as _uuid
+
     import jwt_auth
     from fastapi import FastAPI
+    from fastapi.responses import JSONResponse
     from fastapi.testclient import TestClient
 
     import app.identity.routes as identity_routes
@@ -436,6 +440,27 @@ def api_client(monkeypatch, store):
     monkeypatch.setattr(service, "get_identity_store", _async_return(store))
 
     app = FastAPI()
+
+    # Mirror of the gateway correlation middleware (app.main) so trace
+    # header/envelope unification can be exercised end to end.
+    _v4 = re.compile(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    )
+
+    @app.middleware("http")
+    async def _correlation(request, call_next):
+        header = (request.headers.get("X-Trace-Id") or "").strip()
+        if header:
+            if not _v4.match(header):
+                return JSONResponse(
+                    status_code=400,
+                    content={"detail": "X-Trace-Id must be a valid UUIDv4"},
+                )
+            request.state.trace_id = header
+        else:
+            request.state.trace_id = str(_uuid.uuid4())
+        return await call_next(request)
+
     app.include_router(identity_routes.router, prefix="/api/v1")
     return TestClient(app)
 
@@ -607,6 +632,42 @@ async def test_quarantined_record_stays_quarantined_on_further_replay(store):
     assert again["record"].canonical_id_status == "QUARANTINED"
 
 
+@pytest.mark.asyncio
+async def test_quarantine_dedup_snapshot_and_email_masking(store):
+    """Audit P1: one OPEN quarantine per identity (repeats update the doc),
+    original payload snapshot preserved, emails masked + hashed."""
+    await service.process_intake(
+        intake(source_reference="ABH-Q-7", canonical_candidate_id="cc_one"), store
+    )
+    await service.process_intake(
+        intake(source_reference="ABH-Q-7", canonical_candidate_id="cc_two"), store
+    )
+    await service.process_intake(
+        intake(source_reference="ABH-Q-7", canonical_candidate_id="cc_three"), store
+    )
+
+    open_docs = await store.list_quarantines("open")
+    assert len(open_docs) == 1  # deduped — no duplicate open quarantine
+    doc = open_docs[0]
+    assert doc["occurrence_count"] == 2  # second conflict grew the same doc
+    assert doc["sampada_local_id"] == doc["record"]["sampada_local_id"]
+
+    # Emails masked + hashed everywhere in the quarantine artifact
+    assert doc["record"]["email"] == "s***@e***.com"
+    assert len(doc["record"]["email_sha256"]) == 64
+    assert doc["event"]["email_linking_attribute"] == "s***@e***.com"
+    assert "student@example.com" not in str(doc)
+
+    # Snapshot of the ORIGINAL conflicting intake payload (masked email).
+    # Audit allows either the initial intake or the conflicting replay —
+    # we keep the FIRST conflict's payload (the doc's origin).
+    snap = doc["original_payload_snapshot"]
+    assert snap is not None
+    assert snap["email"] == "s***@e***.com"
+    assert snap["source_reference"] == "ABH-Q-7"
+    assert snap["canonical_candidate_id"] == "cc_two"
+
+
 def test_quarantine_publish_blocked_409(api_client):
     # Create a conflicting-identity record through the API.
     api_client.post(
@@ -735,3 +796,134 @@ def test_quarantine_requires_service_or_admin(api_client, monkeypatch):
     resp = api_client.get("/api/v1/identity/quarantine", headers=headers)
     assert resp.status_code == 403
     assert "service or platform-admin" in resp.json()["detail"].lower()
+
+
+def test_pravesh_sso_admin_cannot_use_service_or_admin_endpoints(
+    api_client, monkeypatch
+):
+    """Audit (CRITICAL): Pravesh SSO roles:["admin"] must get 403 on
+    enrolment/publish and the quarantine admin endpoints."""
+    import jwt as pyjwt
+
+    monkeypatch.setenv("PRAVESH_JWT_SECRET", "pravesh-identity-test-secret")
+    token = pyjwt.encode(
+        {
+            "user_id": "bhiv_sso_admin_1",
+            "email": "sso-admin@example.com",
+            "tenant_id": "tenant_default",
+            "roles": ["admin"],
+            "permissions": [],
+            "allowedApps": ["sampada"],
+        },
+        "pravesh-identity-test-secret",
+        algorithm="HS256",
+    )
+    sso = {"X-Pravesh-Token": token}  # no Authorization header
+
+    pub = api_client.post(
+        "/api/v1/identity/enrolment/publish",
+        json={"sampada_local_id": "sd_x", "dry_run": True},
+        headers=sso,
+    )
+    assert pub.status_code == 403
+    assert "service or platform-admin" in pub.json()["detail"].lower()
+
+    assert api_client.get("/api/v1/identity/quarantine", headers=sso).status_code == 403
+    assert (
+        api_client.post(
+            "/api/v1/identity/quarantine/qid_1/resolve",
+            json={"resolution": "released"},
+            headers=sso,
+        ).status_code
+        == 403
+    )
+
+
+def test_platform_admin_jwt_still_publishes(api_client, monkeypatch):
+    """Positive control: a real platform-admin JWT keeps publish access."""
+    import time
+
+    import jwt as pyjwt
+
+    import jwt_auth
+
+    monkeypatch.setattr(jwt_auth, "JWT_SECRET_KEY", "platform-admin-secret")
+    monkeypatch.setattr(jwt_auth, "CANDIDATE_JWT_SECRET_KEY", "")
+    token = pyjwt.encode(
+        {
+            "sub": "admin_1",
+            "user_id": "admin_1",
+            "email": "admin@example.com",
+            "role": "admin",
+            "exp": int(time.time()) + 3600,
+        },
+        "platform-admin-secret",
+        algorithm="HS256",
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+
+    created = api_client.post(
+        "/api/v1/identity/abhiruchi/intake", json=institute_payload(), headers=AUTH
+    )
+    assert created.status_code == 200, created.text
+    local_id = created.json()["record"]["sampada_local_id"]
+
+    import uuid as _uuid
+
+    pub = api_client.post(
+        "/api/v1/identity/enrolment/publish",
+        json={
+            "sampada_local_id": local_id,
+            "dry_run": True,
+            "trace_id": str(_uuid.uuid4()),
+        },
+        headers=headers,
+    )
+    assert pub.status_code == 200, pub.text
+    assert pub.json()["delivery"] == "SIMULATED"
+
+
+def test_publish_header_and_envelope_trace_never_split(api_client):
+    """Audit: X-Trace-Id header (gateway) must equal envelope.trace_id when
+    the body omits trace_id (no header/envelope split)."""
+    import uuid as _uuid
+
+    created = api_client.post(
+        "/api/v1/identity/abhiruchi/intake", json=institute_payload(), headers=AUTH
+    ).json()
+    local_id = created["record"]["sampada_local_id"]
+
+    header_trace = str(_uuid.uuid4())
+    resp = api_client.post(
+        "/api/v1/identity/enrolment/publish",
+        json={"sampada_local_id": local_id, "dry_run": True},
+        headers={**AUTH, "X-Trace-Id": header_trace},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["envelope"]["trace_id"] == header_trace
+    assert resp.json()["trace_id"] == header_trace
+
+
+def test_intake_adopts_gateway_header_trace_when_body_omits_trace(api_client):
+    """Audit: intake stores the gateway X-Trace-Id when no body trace_id."""
+    import uuid as _uuid
+
+    header_trace = str(_uuid.uuid4())
+    resp = api_client.post(
+        "/api/v1/identity/abhiruchi/intake",
+        json=institute_payload(),
+        headers={**AUTH, "X-Trace-Id": header_trace},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["record"]["trace_id"] == header_trace
+
+
+def test_invalid_gateway_header_trace_rejected(api_client):
+    resp = api_client.post(
+        "/api/v1/identity/abhiruchi/intake",
+        json=institute_payload(),
+        headers={**AUTH, "X-Trace-Id": "trace-not-a-uuid"},
+    )
+    assert resp.status_code == 400
+
+

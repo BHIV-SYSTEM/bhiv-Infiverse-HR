@@ -5876,6 +5876,10 @@ async def update_candidate_profile(candidate_id: str, profile_data: CandidatePro
             )
         
         return {"success": True, "message": "Profile updated successfully"}
+    except HTTPException:
+        # Audit: validation errors must surface as real 400s, not be
+        # swallowed into a 200 {"success": false, ...} body.
+        raise
     except Exception as e:
         return {"success": False, "error": str(e)}
 

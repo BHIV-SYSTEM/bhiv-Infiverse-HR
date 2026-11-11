@@ -210,6 +210,9 @@ def get_auth(
             return {
                 "type": "jwt_token",
                 "user_id": user_info["user_id"],
+                # Audit: preserve the canonical candidate_id claim (never used
+                # for authz decisions — identifiers only).
+                "candidate_id": payload.get("candidate_id"),
                 "email": user_info["email"],
                 "role": token_role,  # Use role from token payload (supports recruiter)
                 "name": user_info["name"],
@@ -231,6 +234,7 @@ def get_auth(
             return {
                 "type": "jwt_token",
                 "user_id": user_info["user_id"],
+                "candidate_id": payload.get("candidate_id"),
                 "email": user_info["email"],
                 "role": user_info["role"],
                 "name": user_info["name"],
@@ -266,6 +270,13 @@ def get_service_or_admin_auth(
     auth = get_auth(credentials, request)
     if auth.get("type") == "api_key":
         return auth
+    # Pravesh SSO identities are never service/platform-admin, even when the
+    # bridge maps their role to "admin" (audit: CRITICAL bypass).
+    if auth.get("type") == "pravesh_sso":
+        raise HTTPException(
+            status_code=403,
+            detail="Service or platform-admin access required",
+        )
     if str(auth.get("role") or "").strip() == "admin":
         return auth
     raise HTTPException(

@@ -9,10 +9,14 @@ Matches ``identity`` records against ``candidates`` by, in order:
 
 Classification per identity record:
   linked     — exactly one confident candidate match
+  already    — link already present and canonical id consistent (no write;
+               makes re-runs idempotent and reportable)
   ambiguous  — more than one candidate matches (reported, never guessed)
   unlinked   — no candidate matches
-  conflict   — candidate already carries a DIFFERENT canonical id
-               (never overwritten — reported for manual remediation)
+  quarantined— identity is QUARANTINED (audit: never linked automatically)
+  conflict   — candidate already carries a DIFFERENT canonical id across any
+               of its id fields (canonical_candidate_id / candidate_id / id —
+               never overwritten — reported for manual remediation)
 
 Default is a DRY RUN that only prints the report. Pass --apply to write:
   candidate.canonical_candidate_id   (only when absent — never overwritten)
@@ -56,6 +60,7 @@ CANDIDATE_FIELDS = {
     "id": 1,
     "candidate_id": 1,
     "canonical_candidate_id": 1,
+    "identity_local_id": 1,
     "name": 1,
 }
 
@@ -65,6 +70,12 @@ def _norm_email(value) -> str:
 
 
 def _candidate_canonical_ids(cand: dict) -> set:
+    """All id-shaped values a candidate document already carries.
+
+    Audit: conflict detection must consider the legacy ``candidate_id`` /
+    ``id`` fields too — checking only ``canonical_candidate_id`` lets the
+    script stamp a second, disagreeing id onto the same candidate.
+    """
     out = set()
     for key in ("canonical_candidate_id", "candidate_id", "id"):
         val = str(cand.get(key) or "").strip()
@@ -80,6 +91,13 @@ def main() -> int:
         action="store_true",
         help="write links (default: dry run, report only)",
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="max identity records to process (0 = all; default streams "
+        "the whole collection in batches — no silent 5000 truncation)",
+    )
     args = parser.parse_args()
 
     uri = os.getenv("DATABASE_URL") or os.getenv("MONGODB_URI")
@@ -93,9 +111,6 @@ def main() -> int:
     db = client[db_name]
     client.admin.command("ping")
 
-    identities = list(db.identity.find({}, IDENTITY_FIELDS).limit(5000))
-    print(f"Loaded {len(identities)} identity records.")
-
     # Candidate indexes for matching
     by_email = defaultdict(list)
     for cand in db.candidates.find({}, CANDIDATE_FIELDS):
@@ -103,14 +118,33 @@ def main() -> int:
         if email:
             by_email[email].append(cand)
 
-    report = {"linked": [], "ambiguous": [], "unlinked": [], "conflict": [], "already": []}
+    report = {
+        "linked": [],
+        "already": [],
+        "ambiguous": [],
+        "unlinked": [],
+        "conflict": [],
+        "quarantined": [],
+    }
     now = datetime.now(timezone.utc)
+    identity_count = 0
 
-    for ident in identities:
+    # Audit: stream in batches (no .limit(5000) silent truncation).
+    cursor = db.identity.find({}, IDENTITY_FIELDS).sort("_id", 1).batch_size(500)
+    for ident in cursor:
+        identity_count += 1
+        if args.limit and identity_count > args.limit:
+            identity_count -= 1
+            break
         local_id = ident.get("sampada_local_id")
         canonical = str(ident.get("canonical_candidate_id") or "").strip()
         email = _norm_email(ident.get("email"))
         status = ident.get("canonical_id_status")
+
+        # Audit: quarantined identities are NEVER linked automatically.
+        if str(status or "").upper() == "QUARANTINED":
+            report["quarantined"].append(local_id)
+            continue
 
         matches = []
         match_how = None
@@ -143,12 +177,29 @@ def main() -> int:
             continue
 
         cand = matches[0]
+        cand_ids = _candidate_canonical_ids(cand)
         cand_canonical = str(cand.get("canonical_candidate_id") or "").strip()
-        if canonical and cand_canonical and cand_canonical != canonical:
-            report["conflict"].append((local_id, str(cand["_id"]), cand_canonical, canonical))
+        if canonical and cand_ids and canonical not in cand_ids:
+            # Candidate already carries a DIFFERENT id (any field) — report.
+            report["conflict"].append(
+                (
+                    local_id,
+                    str(cand["_id"]),
+                    ", ".join(sorted(cand_ids)),
+                    canonical,
+                )
+            )
             continue
 
         entry = (local_id, str(cand["_id"]), match_how, status)
+        already_linked = str(cand.get("identity_local_id") or "") == str(local_id)
+        canonical_stamped = bool(cand_canonical)
+        needs_write = (not already_linked) or (bool(canonical) and not canonical_stamped)
+        if not needs_write:
+            # Idempotent re-run: link + canonical already consistent.
+            report["already"].append(entry)
+            continue
+
         if args.apply:
             set_fields = {
                 "identity_local_id": local_id,
@@ -162,28 +213,36 @@ def main() -> int:
         report["linked"].append(entry)
 
     print("\n===== identity -> candidate linking report =====")
-    print(f"mode      : {'APPLY' if args.apply else 'DRY RUN (pass --apply to write)'}")
-    print(f"linked    : {len(report['linked'])}")
-    print(f"ambiguous : {len(report['ambiguous'])}")
-    print(f"unlinked  : {len(report['unlinked'])}")
-    print(f"conflict  : {len(report['conflict'])}")
+    print(f"mode       : {'APPLY' if args.apply else 'DRY RUN (pass --apply to write)'}")
+    print(f"processed  : {identity_count}")
+    print(f"linked     : {len(report['linked'])}")
+    print(f"already    : {len(report['already'])}")
+    print(f"ambiguous  : {len(report['ambiguous'])}")
+    print(f"unlinked   : {len(report['unlinked'])}")
+    print(f"conflict   : {len(report['conflict'])}")
+    print(f"quarantined: {len(report['quarantined'])}")
 
     for local_id, cand_id, how, status in report["linked"][:20]:
-        print(f"  [linked]    {local_id} -> {cand_id} via {how} (canonical status={status})")
+        print(f"  [linked]     {local_id} -> {cand_id} via {how} (canonical status={status})")
+    for local_id, cand_id, how, status in report["already"][:20]:
+        print(f"  [already]    {local_id} -> {cand_id} via {how} (no write needed)")
     for local_id, cand_ids, how in report["ambiguous"]:
-        print(f"  [ambiguous] {local_id} matched {len(cand_ids)} candidates via {how}: {cand_ids}")
+        print(f"  [ambiguous]  {local_id} matched {len(cand_ids)} candidates via {how}: {cand_ids}")
     for local_id, cand_id, existing, supplied in report["conflict"]:
         print(
-            f"  [conflict]  {local_id} vs candidate {cand_id}: "
+            f"  [conflict]   {local_id} vs candidate {cand_id}: "
             f"candidate has '{existing}', identity has '{supplied}' — NOT overwritten"
         )
+    for local_id in report["quarantined"][:20]:
+        print(f"  [quarantined] {local_id} — skipped (identity.ambiguous.v1 open)")
     for local_id in report["unlinked"][:20]:
-        print(f"  [unlinked]  {local_id}")
+        print(f"  [unlinked]   {local_id}")
     if len(report["unlinked"]) > 20:
         print(f"  ... and {len(report['unlinked']) - 20} more unlinked")
 
     print("\nRules: email is a linking attribute only; canonical ids are never")
-    print("invented, overwritten, or merged by this script.")
+    print("invented, overwritten, or merged by this script; QUARANTINED")
+    print("identities are never linked automatically.")
     return 0
 
 

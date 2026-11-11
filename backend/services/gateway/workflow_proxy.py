@@ -146,15 +146,53 @@ def _parse_stored_workflow_password(stored: Any) -> Optional[str]:
         return None
 
 
+async def _identity_quarantined(email: str) -> bool:
+    """True when the identity store has a QUARANTINED record for this email.
+
+    Audit: quarantined identities must never resolve to workflow
+    credentials / task payloads. Fails closed on unexpected errors.
+    """
+    if not email:
+        return False
+    try:
+        from app.identity.service import get_identity_store
+
+        store = await get_identity_store()
+        recs = await store.find_by_email_institute(email, None)
+        return any(
+            str(getattr(r, "canonical_id_status", "") or "").upper() == "QUARANTINED"
+            for r in recs
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "Identity store unavailable while checking quarantine for workflow "
+            "lookup (%s) — refusing resolution (fail closed).",
+            exc,
+        )
+        return True
+
+
+def _is_quarantined_doc(cand: Dict[str, Any]) -> bool:
+    return str(cand.get("canonical_id_status") or "").upper() == "QUARANTINED"
+
+
 async def _resolve_candidate_document(auth: dict) -> Optional[Dict[str, Any]]:
     """Find the local Sampada candidate document for this auth context.
 
-    Phase 5D (P0-2): resolves three identity shapes instead of assuming the
-    JWT user_id is always a MongoDB ObjectId:
+    Phase 5D (P0-2 + audit hardening): resolves three identity shapes
+    instead of assuming the JWT user_id is always a MongoDB ObjectId:
       1. ObjectId-shaped user_id (classic local accounts) -> ``_id`` lookup
       2. ``pravesh:<uid>`` namespaced SSO identities -> matched by JWT email
       3. canonical / other non-hex candidate ids -> matched by email first,
-         then by the candidate's own ``id`` / ``candidate_id`` string fields
+         then by the candidate's own ``id`` / ``candidate_id`` /
+         ``canonical_candidate_id`` string fields
+
+    Hardening (audit):
+      * multi-document matches (email or id fields) are AMBIGUOUS — the
+        function returns ``None`` instead of silently picking the first hit
+        (narrowing by canonical id is attempted first)
+      * QUARANTINED candidate documents and QUARANTINED identity-store
+        records never resolve (return ``None``).
 
     Returns ``None`` when no candidate document exists — callers fall back
     to JWT claims and never crash on identity shape.
@@ -166,33 +204,94 @@ async def _resolve_candidate_document(auth: dict) -> Optional[Dict[str, Any]]:
     user_id = str(auth.get("user_id") or "").strip()
     email = (auth.get("email") or "").strip()
 
+    # Quarantined identity in the identity store -> never resolve.
+    if email and await _identity_quarantined(email):
+        logger.warning(
+            "Workflow lookup: identity for this email is QUARANTINED — "
+            "refusing candidate resolution."
+        )
+        return None
+
     db = await get_mongo_db()
+
+    async def _collect(flt: Dict[str, Any]) -> List[Dict[str, Any]]:
+        try:
+            return [d async for d in db.candidates.find(flt)]
+        except TypeError:  # pragma: no cover - minimal test doubles
+            return list(db.candidates.find(flt))
+
+    def _narrow(matches: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Return the single unambiguous match, or None (isolated)."""
+        if len(matches) == 1:
+            cand = matches[0]
+            if _is_quarantined_doc(cand):
+                logger.warning(
+                    "Workflow lookup: candidate document is QUARANTINED — "
+                    "refusing resolution."
+                )
+                return None
+            return cand
+        if len(matches) > 1 and user_id:
+            narrowed = [
+                m
+                for m in matches
+                if user_id
+                in (
+                    str(m.get("canonical_candidate_id") or ""),
+                    str(m.get("id") or ""),
+                    str(m.get("candidate_id") or ""),
+                )
+            ]
+            if len(narrowed) == 1 and not _is_quarantined_doc(narrowed[0]):
+                return narrowed[0]
+        if len(matches) > 1:
+            logger.warning(
+                "Workflow lookup: ambiguous match (%d documents) — refusing "
+                "to pick one (audit: no silent first-hit).",
+                len(matches),
+            )
+        return None
 
     # 1. Classic local account: user_id is a real ObjectId
     if user_id and ObjectId.is_valid(user_id):
         cand = await db.candidates.find_one({"_id": ObjectId(user_id)})
         if cand:
+            if _is_quarantined_doc(cand):
+                logger.warning(
+                    "Workflow lookup: candidate document is QUARANTINED — "
+                    "refusing resolution."
+                )
+                return None
             return cand
 
     # 2. Email match (covers pravesh:<uid> and canonical-id JWTs)
     if email:
-        cand = await db.candidates.find_one({"email": email})
-        if cand:
-            return cand
-        escaped = "".join(f"\\{c}" if c in ".^$*+?{}[]()|\\" else c for c in email)
-        cand = await db.candidates.find_one(
-            {"email": {"$regex": f"^{escaped}$", "$options": "i"}}
-        )
-        if cand:
-            return cand
+        matches = await _collect({"email": email})
+        if not matches:
+            escaped = "".join(f"\\{c}" if c in ".^$*+?{}[]()|\\" else c for c in email)
+            matches = await _collect(
+                {"email": {"$regex": f"^{escaped}$", "$options": "i"}}
+            )
+        found = _narrow(matches)
+        if found is not None:
+            return found
+        # Ambiguity (or no match) falls through to id-field lookup only when
+        # there was no match at all; ambiguous emails stay isolated.
+        if matches:
+            return None
 
     # 3. Canonical / string candidate id stored on the candidate document
     if user_id:
-        cand = await db.candidates.find_one(
-            {"$or": [{"id": user_id}, {"candidate_id": user_id}]}
+        matches = await _collect(
+            {
+                "$or": [
+                    {"id": user_id},
+                    {"candidate_id": user_id},
+                    {"canonical_candidate_id": user_id},
+                ]
+            }
         )
-        if cand:
-            return cand
+        return _narrow(matches)
 
     return None
 
@@ -432,13 +531,40 @@ async def _load_task_for_user(task_id: str, auth: dict, workflow_user_id: str) -
     return task
 
 
-def _resolve_portal_candidate_id(auth: dict, candidate_id: Optional[str]) -> str:
+async def _resolve_portal_candidate_id(
+    auth: dict, candidate_id: Optional[str]
+) -> str:
+    """Identifier emitted in task/telemetry payloads.
+
+    Audit: emit the CANONICAL candidate id (identity-linked) whenever the
+    local candidate document resolves — never the raw JWT ``user_id`` for
+    identity-shaped tokens. ``candidate_id`` query params must match the
+    authenticated identity (user_id or its canonical id).
+    """
     if auth.get("type") == "api_key":
         return candidate_id or "api"
     uid = str(auth.get("user_id") or "")
-    if candidate_id and str(candidate_id) != uid:
-        raise HTTPException(status_code=403, detail="candidate_id does not match authenticated candidate.")
-    return uid
+
+    canonical = str(auth.get("candidate_id") or "").strip()  # preserved claim
+    try:
+        cand = await _resolve_candidate_document(auth)
+    except Exception as exc:
+        logger.warning("portal candidate id lookup failed (%s)", exc)
+        cand = None
+    if cand:
+        canonical = str(cand.get("canonical_candidate_id") or "").strip()
+        if not canonical:
+            for field in ("candidate_id", "id"):
+                v = str(cand.get(field) or "").strip()
+                if v and not v.startswith("pravesh:"):
+                    canonical = v
+                    break
+
+    if candidate_id and str(candidate_id) not in {uid, canonical}:
+        raise HTTPException(
+            status_code=403, detail="candidate_id does not match authenticated candidate."
+        )
+    return canonical or uid
 
 
 @router.get("/workflow-bridge-health")
@@ -639,7 +765,7 @@ async def list_workflow_tasks(
     Returns tasks for the Complete-Infiverse employee matching this candidate's email (JWT),
     optionally overridden by workflow_employee_email on the candidate document.
     """
-    portal_cand = _resolve_portal_candidate_id(auth, candidate_id)
+    portal_cand = await _resolve_portal_candidate_id(auth, candidate_id)
     _, wf_uid = await _get_workflow_session(auth)
     r = await _wf_request("GET", f"/users/{wf_uid}/tasks", auth)
     if r.status_code >= 400:
@@ -666,7 +792,7 @@ async def get_workflow_task_detail(
     candidate_id: Optional[str] = None,
     auth: dict = Depends(get_candidate_auth),
 ):
-    portal_cand = _resolve_portal_candidate_id(auth, candidate_id)
+    portal_cand = await _resolve_portal_candidate_id(auth, candidate_id)
     _, wf_uid = await _get_workflow_session(auth)
     task = await _load_task_for_user(task_id, auth, wf_uid)
     sub = await _fetch_submission_for_task(task_id, auth)
@@ -745,5 +871,5 @@ async def submit_workflow_task(
 
     sub_final = await _fetch_submission_for_task(task_id, auth)
     task = await _load_task_for_user(task_id, auth, wf_uid)
-    portal_cand = _resolve_portal_candidate_id(auth, None)
+    portal_cand = await _resolve_portal_candidate_id(auth, None)
     return {"ok": True, "task": _map_task(task, sub_final, portal_cand)}

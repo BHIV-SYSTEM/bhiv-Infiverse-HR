@@ -202,8 +202,10 @@ export default function CandidateProfile() {
                 canonical_candidate_id: cid,
                 institute_code: normInst,
                 campus: campus,
-                cohort_id: 'COHORT-2026-OCT-A',
-                canonical_id_status: 'VERIFIED',
+                // Audit: only surface fields Abhiruchi actually returned —
+                // never fabricate a cohort id or a VERIFIED status.
+                cohort_id: matched.cohort_id || null,
+                canonical_id_status: matched.canonical_id_status || 'UNKNOWN',
                 email: email
               }
               setIdentityRecord(abhiruchiRecord)

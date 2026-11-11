@@ -29,6 +29,7 @@ Kill switch: ``NDA_GATE_ENABLED=false`` disables enforcement only
 from __future__ import annotations
 
 import base64
+import logging
 import os
 from datetime import datetime, timezone
 from io import BytesIO
@@ -38,6 +39,8 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
 from jwt_auth import get_auth, get_service_or_admin_auth
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -75,6 +78,20 @@ def nda_gate_enabled() -> bool:
         "no",
         "off",
     )
+
+
+def _hardened_env() -> bool:
+    """True when ENV/ENVIRONMENT marks a shared or live deployment."""
+    env = (os.getenv("ENV") or os.getenv("ENVIRONMENT") or "").strip().lower()
+    return env in ("staging", "production", "prod")
+
+
+class NdaVerificationUnavailable(RuntimeError):
+    """Raised when auto-verification cannot run (e.g. PyPDF2 missing).
+
+    Surfaces as HTTP 503 (misconfiguration) — NEVER as a silent REJECTED
+    verdict (audit: a missing dependency is not an invalid document).
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -126,9 +143,16 @@ def verify_nda_pdf(
         reasons.append("not_a_pdf_magic_header")
         return verdict(NDA_STATUS_REJECTED)
 
+    # Import OUTSIDE the parse try: a missing PyPDF2 is a server
+    # misconfiguration (503), not a document failure (silent REJECTED).
     try:
         from PyPDF2 import PdfReader
+    except ImportError as exc:
+        raise NdaVerificationUnavailable(
+            "PyPDF2 is not installed — NDA auto-verification unavailable"
+        ) from exc
 
+    try:
         reader = PdfReader(BytesIO(content))
         if reader.is_encrypted:
             reasons.append("pdf_encrypted")
@@ -264,14 +288,40 @@ async def enforce_nda_gate(auth: Dict[str, Any]) -> None:
         return
 
     try:
-        from app.database import get_mongo_db
+        from app.database import DatabaseNotConfiguredError, get_mongo_db
 
         db = await get_mongo_db()
-    except Exception:
-        # No database configured (local dev / unit tests): nothing to gate.
+    except DatabaseNotConfiguredError:
+        # No database configured at all (local dev / unit tests): there is
+        # no candidate data to protect — enforcement is skipped.
+        return
+    except Exception as exc:
+        # Audit: an unexpected DB failure fails CLOSED in staging/production
+        # (never silently bypass the gate); dev keeps the old fail-open.
+        if _hardened_env():
+            logger.error(
+                "NDA gate: database unavailable (%s) — failing closed.", exc
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="NDA verification status unavailable — try again shortly",
+            )
+        logger.warning("NDA gate: database unavailable (%s) — skipped (dev).", exc)
         return
 
-    status = await get_nda_status(db, user_id)
+    try:
+        status = await get_nda_status(db, user_id)
+    except Exception as exc:
+        if _hardened_env():
+            logger.error(
+                "NDA gate: status lookup failed (%s) — failing closed.", exc
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="NDA verification status unavailable — try again shortly",
+            )
+        logger.warning("NDA gate: status lookup failed (%s) — skipped (dev).", exc)
+        return
     if status.get("gate_passed"):
         return
 
@@ -461,11 +511,15 @@ async def upload_nda(
     except Exception:
         pass
 
-    verification = verify_nda_pdf(
-        content,
-        candidate_name=candidate_name,
-        candidate_email=candidate_email,
-    )
+    try:
+        verification = verify_nda_pdf(
+            content,
+            candidate_name=candidate_name,
+            candidate_email=candidate_email,
+        )
+    except NdaVerificationUnavailable as exc:
+        # Audit: missing dependency = 503 misconfiguration, never REJECTED.
+        raise HTTPException(status_code=503, detail=str(exc))
     collection = _nda_collection(db)
     if collection is None:
         raise HTTPException(status_code=503, detail="NDA storage unavailable")
@@ -517,7 +571,8 @@ async def download_nda(
     from app.database import get_mongo_db
 
     role = str(auth.get("role") or "").strip().lower()
-    if role == "admin" or auth.get("type") == "api_key":
+    auth_type = str(auth.get("type") or "").strip().lower()
+    if (role == "admin" and auth_type != "pravesh_sso") or auth_type == "api_key":
         target = (candidate_id or "").strip()
         if not target:
             raise HTTPException(
@@ -609,9 +664,9 @@ async def nda_admin_review(
     if not rec:
         raise HTTPException(status_code=404, detail="No NDA submission for this candidate")
 
-    reviewer = str(
-        payload.get("reviewer") or auth.get("user_id") or "admin"
-    )
+    # Audit: reviewed_by is STRICTLY the authenticated principal — a
+    # spoofable "reviewer" field in the payload is ignored.
+    reviewer = str(auth.get("user_id") or auth.get("email") or "admin")
     now = datetime.now(timezone.utc)
     update = {
         "status": decision,
