@@ -61,11 +61,15 @@ Clients. Backend is a Python FastAPI microservice suite; frontend is React + Vit
 ```powershell
 # Backend
 cd backend
+copy .env.example .env
 setup_venv.bat          # first time only
 run_with_venv.bat       # starts gateway:8000, agent:9000, langgraph:9001
+python run_services.py       
+
 
 # Frontend (separate terminal)
 cd frontend
+copy .env.example .env
 npm install
 npm run dev             # http://localhost:3000
 ```

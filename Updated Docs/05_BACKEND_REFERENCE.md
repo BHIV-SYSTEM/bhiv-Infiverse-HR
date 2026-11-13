@@ -34,8 +34,12 @@
 | Module | Responsibility |
 |--------|----------------|
 | `config.py` | Requires `DATABASE_URL`, `API_KEY_SECRET`, `JWT_SECRET_KEY`, `CANDIDATE_JWT_SECRET_KEY`, `AGENT_SERVICE_URL`, `LANGGRAPH_SERVICE_URL` |
-| `jwt_auth.py` | Triple-layer auth (API key / candidate JWT / client JWT), role guards, audience validation |
+| `jwt_auth.py` | Triple-layer auth (API key / candidate JWT / client JWT), role guards, audience validation, service-only guard `get_service_auth` |
 | `dependencies.py` | Re-exports auth dependencies for routers |
+| `routes/tenancy_routes.py` | Platform-admin login, tenant hierarchy CRUD, key-account sub-client management, single-use invite share links |
+| `app/nda.py` | Candidate NDA gate: official template render, PyPDF2 auto-verification, tenant-company review, enforcement helper |
+| `app/verification.py` | KYC identity verification: PDF text extraction + name match → honest VERIFIED/REJECTED/UNVERIFIABLE verdicts (legacy on Profile) |
+| `app/contact_verification.py` | Contact verification: email OTP for independent candidates (Gmail SMTP; hired/placed → hidden) |
 | `monitoring.py` | Prometheus metrics |
 | `workflow_proxy.py` | Complete-Infiverse bridge (`/v1/candidate/workflow-*`, token refresh) |
 | `langgraph_integration.py` | Workflow/notification proxy router |

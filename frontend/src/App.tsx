@@ -4,12 +4,12 @@ import { Toaster } from 'react-hot-toast'
 import SplashScreen from './components/SplashScreen'
 import AuthPage from './pages/auth/AuthPage'
 import AdminLoginPage from './pages/auth/AdminLoginPage'
+import InviteSignupPage from './pages/auth/InviteSignupPage'
 import AdminTenantsPage from './pages/admin/AdminTenantsPage'
 import { ThemeProvider } from './context/ThemeContext'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import ProtectedRoute, { PublicRoute } from './components/ProtectedRoute'
 import NdaGate from './components/NdaGate'
-import AdminNdaApprovalsPage from './pages/admin/AdminNdaApprovalsPage'
 
 // Layouts
 import CandidateLayout from './components/layouts/CandidateLayout'
@@ -50,6 +50,7 @@ import MatchResults from './pages/client/MatchResults'
 import ClientReports from './pages/client/ClientReports'
 import LiveRecruiterMonitoring from './pages/client/LiveRecruiterMonitoring'
 import SubClients from './pages/client/SubClients'
+import NdaApprovalsPage from './pages/client/NdaApprovalsPage'
 import ControlCenter from './pages/control/ControlCenter'
 
 function HomeRedirect() {
@@ -105,6 +106,9 @@ function App() {
               {/* Public Routes */}
               <Route path="/" element={<HomeRedirect />} />
               <Route path="/auth" element={<PublicRoute><AuthPage /></PublicRoute>} />
+              {/* Tenanted invite link — public, single-use; the recipient
+                  creates their own Client-Portal account (never the admin). */}
+              <Route path="/invite/:token" element={<InviteSignupPage />} />
 
               {/* Platform admin (multi-tenant hierarchy) — the admin link */}
               <Route path="/admin" element={<Navigate to="/admin/login" replace />} />
@@ -117,15 +121,8 @@ function App() {
                   </ProtectedRoute>
                 }
               />
-              {/* NDA approvals — manual review fallback for the candidate NDA gate */}
-              <Route
-                path="/admin/ndas"
-                element={
-                  <ProtectedRoute allowedRoles={['admin']}>
-                    <AdminNdaApprovalsPage />
-                  </ProtectedRoute>
-                }
-              />
+              {/* NDA approvals live with the OWNING COMPANY (tenant subset
+                  only). The central admin has no NDA access (tenancy audit). */}
               <Route
                 path="/control"
                 element={
@@ -197,6 +194,7 @@ function App() {
                 <Route path="live-monitoring" element={<LiveRecruiterMonitoring />} />
                 <Route path="reports" element={<ClientReports />} />
                 <Route path="sub-clients" element={<SubClients />} />
+                <Route path="ndas" element={<NdaApprovalsPage />} />
               </Route>
 
               {/* Fallback - re-evaluate via HomeRedirect */}
@@ -205,7 +203,7 @@ function App() {
             <Toaster
               position="top-right"
               toastOptions={{
-                duration: 3000,
+                duration: 6000,
                 className: 'dark:bg-gray-900 dark:text-gray-100',
                 style: {
                   background: 'var(--toast-bg, #ffffff)',

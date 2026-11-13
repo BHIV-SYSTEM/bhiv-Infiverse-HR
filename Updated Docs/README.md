@@ -21,7 +21,7 @@
 | 04 | [04_SETUP_AND_RUN.md](04_SETUP_AND_RUN.md) | Local setup + run steps (15-minute start) |
 | 05 | [05_BACKEND_REFERENCE.md](05_BACKEND_REFERENCE.md) | Gateway / Agent / LangGraph internals, env inventory |
 | 06 | [06_API_REFERENCE.md](06_API_REFERENCE.md) | Live endpoint inventory (**204 operations**) |
-| 07 | [07_AUTHENTICATION_AND_SECURITY.md](07_AUTHENTICATION_AND_SECURITY.md) | Triple-auth, 2FA, RBAC, security controls |
+| 07 | [07_AUTHENTICATION_AND_SECURITY.md](07_AUTHENTICATION_AND_SECURITY.md) | Triple-auth, 2FA, RBAC, security controls, NDA gate (tenant review), invite share links, KYC verification |
 | 08 | [08_DATABASE.md](08_DATABASE.md) | MongoDB collections, schemas, seed, migrations |
 | 09 | [09_FRONTEND_REFERENCE.md](09_FRONTEND_REFERENCE.md) | Routes, pages, services, contexts, auth flow |
 | 10 | [10_TESTING_AND_EVIDENCE.md](10_TESTING_AND_EVIDENCE.md) | Test suites + `evidence/` artifacts |
@@ -31,7 +31,7 @@
 | 14 | [14_SCOPE_SPRINTS_VANA.md](14_SCOPE_SPRINTS_VANA.md) | SETU ecosystem, sprints, VANA, partners |
 | 15 | [15_KNOWN_ISSUES_ARCHIVE_INDEX.md](15_KNOWN_ISSUES_ARCHIVE_INDEX.md) | Gaps/tech debt + archive map |
 | 16 | [16_ECOSYSTEM_INTEGRATION_REFERENCE.md](16_ECOSYSTEM_INTEGRATION_REFERENCE.md) | Ecosystem integration deep-dive (9 repos, data flows, deployment) |
-| 17 | [17_TENANT_HIERARCHY_AND_ADMIN_ACCESS.md](17_TENANT_HIERARCHY_AND_ADMIN_ACCESS.md) | Multi-tenant hierarchy (platform → key account → client), isolation rules, admin login link, SVA onboarding |
+| 17 | [17_TENANT_HIERARCHY_AND_ADMIN_ACCESS.md](17_TENANT_HIERARCHY_AND_ADMIN_ACCESS.md) | Multi-tenant hierarchy (platform → key account → client), isolation rules, admin login link, invite share links, SVA onboarding |
 | REF | [BHIV_ECOSYSTEM_RUNTIME_CONVERGENCE_AUDIT.md](BHIV_ECOSYSTEM_RUNTIME_CONVERGENCE_AUDIT.md) | Full runtime convergence audit — live verification, gaps, AI tools, next steps |
 
 **Start here → [00_VERIFICATION_REPORT.md](00_VERIFICATION_REPORT.md)**
@@ -45,7 +45,7 @@
   LangGraph `:9001` (workflows/notifications/RL). **204 total live API operations.**
 - **Frontend**: React 18 + Vite + TypeScript SPA on `:3000` with candidate / recruiter / client /
   control-center portals.
-- **Database**: MongoDB Atlas (`bhiv_hr`), 33 collections.
+- **Database**: MongoDB Atlas (`bhiv_hr`), 34 collections.
 - **Ecosystem**: 9 integrated partner repos (Artha, ai-crm, Karma-Tracker, Prana, bucket,
   bhiv-registry, bhiv-intelligence-samachar, bhiv-SVACS, workflow-blackhole). Full profiles in
   `16_ECOSYSTEM_INTEGRATION_REFERENCE.md`.

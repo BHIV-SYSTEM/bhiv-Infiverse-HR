@@ -21,13 +21,13 @@
 
 ---
 
-## 2. Collections (33 — extracted from service source)
+## 2. Collections (34 — extracted from service source)
 
 | Collection | Created by | Purpose |
 |-----------|-----------|---------|
 | `application_documents` | gateway | Per-application document uploads (resume/NDA) |
 | `audit_logs` | gateway | Security + control-center audit trail |
-| `candidates` | gateway/agent | Candidate profiles (email unique, bcrypt `password_hash`) |
+| `candidates` | gateway/agent | Candidate profiles (email unique, bcrypt `password_hash`; `kyc` sub-document holds the identity-verification verdict) |
 | `challenges` | gateway governance | Governance challenges |
 | `client_connected_recruiter` | gateway | Client ↔ recruiter connection records |
 | `clients` | gateway | Tenant clients (email unique, `client_code` unique) |
@@ -55,6 +55,7 @@
 | `rl_training_data` | langgraph RL | RL training samples |
 | `schema_version` | seed | Schema version (4.3.0) |
 | `setu_signals` | gateway SETU | Inbound SETU signals (signal_type) |
+| `tenant_invites` | gateway tenancy | Single-use company share links (token unique, TTL, revocable) |
 | `units` | gateway workforce | Unit nodes (lineage-enveloped) |
 | `workflow_overrides` | gateway governance | Workflow override records |
 | `workflows` | langgraph | LangGraph workflow instances |
@@ -95,6 +96,7 @@ created on first use by the corresponding gateway modules.
 | `rl_feedback` | `prediction_id` |
 | `rate_limits` | `{client_ip, endpoint}`, `expires_at` (TTL) |
 | `csp_violations` | `timestamp` |
+| `tenant_invites` | `token` (unique), `{tenant_id, created_at}` |
 
 ---
 

@@ -20,7 +20,7 @@ import asyncio
 import os
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock
@@ -37,6 +37,15 @@ os.environ.setdefault("PLATFORM_ADMIN_PASSWORD", "AdminPassw0rd!")
 
 import jwt as pyjwt  # noqa: E402
 import pytest  # noqa: E402
+
+# jwt_auth may already have been imported by an earlier test module (collection
+# order is argument-dependent), capturing empty secrets from the environment
+# before the setdefault above ran. Re-sync its module globals so the admin/client
+# route guards validate tokens in ANY test execution order.
+import jwt_auth as _jwt_auth  # noqa: E402
+
+_jwt_auth.JWT_SECRET_KEY = os.environ["JWT_SECRET_KEY"]
+_jwt_auth.CANDIDATE_JWT_SECRET_KEY = os.environ["CANDIDATE_JWT_SECRET_KEY"]
 
 from app import tenant_registry  # noqa: E402
 from app.control_center_governance import (  # noqa: E402
@@ -73,6 +82,18 @@ def _match(doc: Dict[str, Any], flt: Optional[Dict[str, Any]]) -> bool:
             for op, operand in expected.items():
                 if op == "$ne":
                     if value == operand:
+                        return False
+                elif op == "$gt":
+                    if value is None or not value > operand:
+                        return False
+                elif op == "$gte":
+                    if value is None or not value >= operand:
+                        return False
+                elif op == "$lt":
+                    if value is None or not value < operand:
+                        return False
+                elif op == "$lte":
+                    if value is None or not value <= operand:
                         return False
                 elif op == "$in":
                     if isinstance(value, list):
@@ -165,6 +186,7 @@ class FakeDB:
         self.audit_logs = FakeCollection("audit_logs")
         self.jobs = FakeCollection("jobs")
         self.client_connected_recruiter = FakeCollection("client_connected_recruiter")
+        self.tenant_invites = FakeCollection("tenant_invites")
 
 
 # ── hierarchy fixtures ────────────────────────────────────────────────────────
@@ -1048,3 +1070,247 @@ def test_client_login_normalizes_email_and_rejects_bad_password(monkeypatch):
         assert legacy.json()["success"] is True, legacy.text
     finally:
         tenant_registry.set_snapshot(tenant_registry.build_snapshot([]))
+
+
+# ── tenanted invite links (share access; single-use, 7-day expiry) ────────────
+
+
+def _seed_invite_tenant(db) -> str:
+    db.tenants.docs.append(
+        {
+            "tenant_id": "invite-co",
+            "name": "Invite Co",
+            "level": "account",
+            "parent_tenant_id": "platform",
+            "path": "/platform/invite-co/",
+            "client_ids": [],
+            "status": "active",
+            "created_at": NOW,
+        }
+    )
+    return "invite-co"
+
+
+def _mint_invite(client, tenant_id: str = "invite-co", body: Optional[Dict[str, Any]] = None):
+    admin = _admin_headers(client)
+    resp = client.post(
+        f"/v1/admin/tenants/{tenant_id}/invites",
+        json=(body or {}),
+        headers=admin,
+    )
+    return resp, admin
+
+
+def test_invite_create_list_and_revoke(api):
+    client, db, _ = api
+    _seed_invite_tenant(db)
+
+    created, admin = _mint_invite(client)
+    assert created.status_code == 201, created.text
+    invite = created.json()["invite"]
+    assert invite["status"] == "active"
+    assert invite["invite_path"] == f"/invite/{invite['token']}"
+    assert len(invite["token"]) >= 32
+    token = invite["token"]
+
+    # Default TTL is the agreed 7 days.
+    expires = datetime.fromisoformat(invite["expires_at"])
+    minted = datetime.fromisoformat(invite["created_at"])
+    assert timedelta(hours=167, minutes=59) <= (expires - minted) <= timedelta(
+        hours=168, minutes=1
+    )
+
+    # Re-shareable: the admin can list the link later without the DB.
+    listed = client.get("/v1/admin/tenants/invite-co/invites", headers=admin)
+    assert listed.status_code == 200
+    assert [i["token"] for i in listed.json()["invites"]] == [token]
+
+    # Public info leaks only the display name/level — no tenant ids/roster.
+    info = client.get(f"/v1/invite/{token}")
+    assert info.status_code == 200
+    invite_view = info.json()["invite"]
+    assert set(invite_view.keys()) == {"tenant", "expires_at"}
+    assert invite_view["tenant"] == {"name": "Invite Co", "level": "account"}
+
+    # Revoke kills both redemption and public info.
+    revoked = client.post(
+        f"/v1/admin/tenants/invite-co/invites/{token}/revoke", headers=admin
+    )
+    assert revoked.status_code == 200 and revoked.json()["revoked"] is True
+    assert client.get(f"/v1/invite/{token}").status_code == 404
+    reg = client.post(
+        f"/v1/invite/{token}/register",
+        json={"email": "late@example.test", "password": "Passw0rd!x", "company_name": "X"},
+    )
+    assert reg.status_code == 404
+    assert any(
+        a.get("action") == "tenant_invite_revoke" for a in db.audit_logs.docs
+    )
+
+
+def test_invite_register_creates_client_and_links_tenant(api):
+    client, db, _ = api
+    _seed_invite_tenant(db)
+    created, admin = _mint_invite(client)
+    token = created.json()["invite"]["token"]
+
+    resp = client.post(
+        f"/v1/invite/{token}/register",
+        json={
+            "email": "  Founder@Example.TEST ",
+            "password": "Passw0rd!x",
+            "company_name": "Invite Co",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["success"] is True
+    assert body["tenant"] == {"tenant_id": "invite-co", "name": "Invite Co"}
+    account = body["client_account"]
+    assert account["client_id"] and account["client_code"] and account["connection_id"]
+    assert account["email"] == "founder@example.test"  # normalized
+    # The recipient set the password themselves — never echoed back.
+    assert "password" not in account and "generated_password" not in account
+
+    # Attached to the tenant node in the same call.
+    assert account["client_id"] in db.tenants.docs[0]["client_ids"]
+    invite_doc = db.tenant_invites.docs[0]
+    assert invite_doc["used_at"] is not None
+    assert invite_doc["used_by_client_id"] == account["client_id"]
+
+    # Single use: a second redemption with a fresh email is refused.
+    again = client.post(
+        f"/v1/invite/{token}/register",
+        json={"email": "second@example.test", "password": "Passw0rd!x", "company_name": "X"},
+    )
+    assert again.status_code == 404
+    assert client.get(f"/v1/invite/{token}").status_code == 404
+    assert any(
+        a.get("action") == "tenant_invite_register" for a in db.audit_logs.docs
+    )
+    # And the refused attempt must not have created a client account.
+    assert not any(
+        c.get("email") == "second@example.test" for c in db.clients.docs
+    )
+
+
+def test_invite_register_validation_and_no_burn_on_conflict(api):
+    client, db, _ = api
+    _seed_invite_tenant(db)
+    created, admin = _mint_invite(client)
+    token = created.json()["invite"]["token"]
+
+    # Pydantic: password < 8 chars.
+    short = client.post(
+        f"/v1/invite/{token}/register",
+        json={"email": "x@y.test", "password": "short", "company_name": "X"},
+    )
+    assert short.status_code == 422
+
+    # Hand-rolled: email without @ → 400 (and the claim is released).
+    bad_email = client.post(
+        f"/v1/invite/{token}/register",
+        json={"email": "not-an-email", "password": "longenough1", "company_name": "X"},
+    )
+    assert bad_email.status_code == 400
+
+    # Pre-existing email → 409 and the link is NOT burned by the failure.
+    db.clients.docs.append(
+        {
+            "client_id": "existing_cp",
+            "company_name": "Taken Co",
+            "email": "taken@example.test",
+            "password_hash": "x",
+            "status": "active",
+        }
+    )
+    conflict = client.post(
+        f"/v1/invite/{token}/register",
+        json={"email": "taken@example.test", "password": "Passw0rd!x", "company_name": "X"},
+    )
+    assert conflict.status_code == 409
+    assert db.tenant_invites.docs[0]["used_at"] is None  # claim rolled back
+
+    # A different email can still redeem the same link afterwards.
+    ok = client.post(
+        f"/v1/invite/{token}/register",
+        json={"email": "fresh@example.test", "password": "Passw0rd!x", "company_name": "Fresh Co"},
+    )
+    assert ok.status_code == 201, ok.text
+    assert (
+        ok.json()["client_account"]["client_id"] in db.tenants.docs[0]["client_ids"]
+    )
+
+
+def test_expired_invite_is_410(api):
+    from datetime import timedelta
+
+    client, db, _ = api
+    _seed_invite_tenant(db)
+    created, admin = _mint_invite(client)
+    token = created.json()["invite"]["token"]
+    db.tenant_invites.docs[0]["expires_at"] = datetime.now(timezone.utc) - timedelta(
+        hours=1
+    )
+
+    assert client.get(f"/v1/invite/{token}").status_code == 410
+    resp = client.post(
+        f"/v1/invite/{token}/register",
+        json={"email": "late@example.test", "password": "Passw0rd!x", "company_name": "X"},
+    )
+    assert resp.status_code == 410
+    assert not db.clients.docs  # nothing created
+
+
+def test_invite_authz_and_tenant_validation(api):
+    client, db, _ = api
+    _seed_invite_tenant(db)
+
+    # Anonymous → 401; client-role token → 403 (hierarchy admin is platform-only).
+    assert (
+        client.post("/v1/admin/tenants/invite-co/invites", json={}).status_code == 401
+    )
+    sva = {"Authorization": f"Bearer {_client_token('sva_cp')}"}
+    assert (
+        client.post("/v1/admin/tenants/invite-co/invites", json={}, headers=sva).status_code
+        == 403
+    )
+    assert (
+        client.get("/v1/admin/tenants/invite-co/invites").status_code == 401
+    )
+
+    created, admin = _mint_invite(client)
+    assert created.status_code == 201
+
+    # Unknown tenant → 404; suspended tenant → 400.
+    assert _mint_invite(client, tenant_id="nope")[0].status_code == 404
+    db.tenants.docs[0]["status"] = "suspended"
+    assert _mint_invite(client)[0].status_code == 400
+    db.tenants.docs[0]["status"] = "active"
+
+    # TTL bounds: min 1h, max 720h (30 days).
+    assert _mint_invite(client, body={"expires_in_hours": 0})[0].status_code == 422
+    assert _mint_invite(client, body={"expires_in_hours": 5001})[0].status_code == 422
+    custom, _ = _mint_invite(client, body={"expires_in_hours": 48})
+    assert custom.status_code == 201
+    delta = datetime.fromisoformat(
+        custom.json()["invite"]["expires_at"]
+    ) - datetime.fromisoformat(custom.json()["invite"]["created_at"])
+    assert timedelta(hours=47, minutes=59) <= delta <= timedelta(hours=48, minutes=1)
+
+    # Unknown token → 404 on both info and redemption; revoke of unknown → 404.
+    assert client.get("/v1/invite/never-generated-token").status_code == 404
+    assert (
+        client.post(
+            "/v1/invite/never-generated-token/register",
+            json={"email": "a@b.test", "password": "longenough1", "company_name": "X"},
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/v1/admin/tenants/invite-co/invites/never-generated-token/revoke",
+            headers=admin,
+        ).status_code
+        == 404
+    )

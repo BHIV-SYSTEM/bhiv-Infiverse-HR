@@ -2434,6 +2434,94 @@ export const fetchAdminClients = async (
 }
 
 // ---------------------------------------------------------------------------
+// Tenanted invite links (central admin shares access; single-use, 7-day expiry)
+// The recipient — not the admin — creates their own Client-Portal account.
+// ---------------------------------------------------------------------------
+
+export type TenantInviteStatus = 'active' | 'used' | 'expired' | 'revoked'
+
+export interface TenantInvite {
+  token: string
+  invite_path: string
+  tenant_id: string
+  status: TenantInviteStatus
+  created_by: string
+  created_at: string | null
+  expires_at: string | null
+  used_at: string | null
+  used_by_client_id: string | null
+  revoked: boolean
+}
+
+export const createAdminTenantInvite = async (
+  tenantId: string,
+  expiresInHours?: number
+): Promise<{ success: boolean; invite: TenantInvite }> => {
+  const response = await api.post(
+    `/v1/admin/tenants/${encodeURIComponent(tenantId)}/invites`,
+    expiresInHours ? { expires_in_hours: expiresInHours } : {},
+    { headers: getAuthHeaders() }
+  )
+  return response.data
+}
+
+export const fetchAdminTenantInvites = async (
+  tenantId: string
+): Promise<{ success: boolean; invites: TenantInvite[] }> => {
+  const response = await api.get(
+    `/v1/admin/tenants/${encodeURIComponent(tenantId)}/invites`,
+    { headers: getAuthHeaders() }
+  )
+  return response.data
+}
+
+export const revokeAdminTenantInvite = async (
+  tenantId: string,
+  token: string
+): Promise<{ success: boolean; revoked: boolean }> => {
+  const response = await api.post(
+    `/v1/admin/tenants/${encodeURIComponent(tenantId)}/invites/${encodeURIComponent(
+      token
+    )}/revoke`,
+    {},
+    { headers: getAuthHeaders() }
+  )
+  return response.data
+}
+
+export interface PublicInviteView {
+  success: boolean
+  invite: {
+    tenant: { name: string; level: string }
+    expires_at: string | null
+  }
+}
+
+export const fetchInvite = async (token: string): Promise<PublicInviteView> => {
+  const response = await api.get(`/v1/invite/${encodeURIComponent(token)}`)
+  return response.data
+}
+
+export const registerViaInvite = async (
+  token: string,
+  payload: { email: string; password: string; company_name: string }
+): Promise<{
+  success: boolean
+  tenant: { tenant_id: string; name: string }
+  client_account: {
+    client_id: string
+    client_code: string
+    connection_id: string
+    email: string
+    company_name: string
+  }
+  message: string
+}> => {
+  const response = await api.post(`/v1/invite/${encodeURIComponent(token)}/register`, payload)
+  return response.data
+}
+
+// ---------------------------------------------------------------------------
 // Candidate NDA gate (Phase 5D)
 // ---------------------------------------------------------------------------
 
@@ -2445,6 +2533,9 @@ export interface NdaVerification {
   method: string
   checked_at: string
   admin_override?: NdaStatusValue
+  tenant_override?: NdaStatusValue
+  auto_decision?: NdaStatusValue
+  auto_decision_reason?: string
 }
 
 export interface NdaStatus {
@@ -2517,7 +2608,9 @@ export const openNdaTemplate = async (): Promise<void> => {
 }
 
 // ---------------------------------------------------------------------------
-// NDA admin review (platform admin panel at /admin/ndas)
+// NDA review — company (tenant) dashboard at /client/ndas.
+// The central admin has NO NDA access (tenancy audit): these endpoints are
+// company-JWT scoped to the caller's own tenant subset.
 // ---------------------------------------------------------------------------
 
 export interface NdaQueueItem {
@@ -2530,21 +2623,32 @@ export interface NdaQueueItem {
   updated_at: string | null
 }
 
-export const fetchNdaAdminQueue = async (): Promise<{
-  queue: NdaQueueItem[]
+export interface TenantNdaQueueItem extends NdaQueueItem {
+  candidate_name?: string | null
+  review?: {
+    reviewed_by: string
+    reviewed_at: string
+    decision: string
+    note?: string
+  } | null
+}
+
+export const fetchTenantNdaQueue = async (): Promise<{
+  queue: TenantNdaQueueItem[]
   count: number
+  scope: string
 }> => {
-  const response = await api.get('/v1/nda/admin/queue', { headers: getAuthHeaders() })
+  const response = await api.get('/v1/nda/tenant/queue', { headers: getAuthHeaders() })
   return response.data
 }
 
-export const reviewNda = async (
+export const reviewTenantNda = async (
   candidateId: string,
   decision: 'VERIFIED' | 'REJECTED',
   note?: string
-): Promise<{ ok: boolean; status: NdaStatusValue; gate_passed: boolean }> => {
+): Promise<{ ok: boolean; status: NdaStatusValue; gate_passed: boolean; reviewed_by: string }> => {
   const response = await api.post(
-    `/v1/nda/admin/${encodeURIComponent(candidateId)}/review`,
+    `/v1/nda/tenant/${encodeURIComponent(candidateId)}/review`,
     { decision, note: note || '' },
     { headers: getAuthHeaders() }
   )
@@ -2557,6 +2661,112 @@ export const fetchNdaDocumentBlob = async (candidateId: string): Promise<Blob> =
     headers: getAuthHeaders(),
     responseType: 'blob',
   })
+  return response.data
+}
+
+// ---------------------------------------------------------------------------
+// Identity / KYC verification (Workstream C) — automated text + name match.
+// Verdicts are honest: VERIFIED, REJECTED, UNVERIFIABLE (image-only / no
+// extractable text), or NOT_SUBMITTED. No OCR, no silent passes.
+// ---------------------------------------------------------------------------
+
+export type KycStatusValue = 'NOT_SUBMITTED' | 'VERIFIED' | 'REJECTED' | 'UNVERIFIABLE'
+
+export interface KycVerification {
+  result: KycStatusValue
+  reasons: string[]
+  method: string
+  checked_at: string
+}
+
+export interface KycStatus {
+  candidate_id: string
+  status: KycStatusValue
+  verification: KycVerification | null
+  document: {
+    filename: string
+    content_type: string
+    size_bytes: number
+    uploaded_at: string
+  } | null
+}
+
+export interface KycUploadResult {
+  ok: boolean
+  status: KycStatusValue
+  verification: KycVerification
+  document: KycStatus['document']
+  message: string
+}
+
+export const fetchKycStatus = async (): Promise<KycStatus> => {
+  const response = await api.get('/v1/verification/kyc/status', { headers: getAuthHeaders() })
+  return response.data
+}
+
+export const uploadKycDocument = async (file: File): Promise<KycUploadResult> => {
+  const form = new FormData()
+  form.append('file', file)
+  // Explicit multipart type: the axios instance defaults to application/json,
+  // which FastAPI rejects for form uploads (422 body.file missing). Axios/XHR
+  // still attaches the multipart boundary for FormData bodies.
+  const response = await api.post('/v1/verification/kyc/document', form, {
+    headers: { ...getAuthHeaders(), 'Content-Type': 'multipart/form-data' },
+    timeout: 120000,
+  })
+  return response.data
+}
+
+// ---------------------------------------------------------------------------
+// Contact verification (email OTP) — independent / unplaced candidates only.
+// Hired or placed candidates get eligible:false and the card is hidden.
+// ---------------------------------------------------------------------------
+
+export type ContactVerificationStatusValue = 'NOT_VERIFIED' | 'CONTACT_VERIFIED'
+
+export interface ContactVerificationStatus {
+  candidate_id: string
+  eligible: boolean
+  reason?: string | null
+  status: ContactVerificationStatusValue | null
+  email_masked?: string | null
+  verified_at?: string | null
+  method?: string | null
+}
+
+export interface ContactOtpSendResult {
+  ok: boolean
+  already_verified: boolean
+  email_masked: string
+  expires_in: number
+  message: string
+}
+
+export interface ContactOtpVerifyResult {
+  ok: boolean
+  status: ContactVerificationStatusValue
+  message: string
+  verified_at?: string
+}
+
+export const fetchContactStatus = async (): Promise<ContactVerificationStatus> => {
+  const response = await api.get('/v1/verification/contact/status', { headers: getAuthHeaders() })
+  return response.data
+}
+
+export const sendContactOtp = async (): Promise<ContactOtpSendResult> => {
+  const response = await api.post('/v1/verification/contact/otp/send', null, {
+    headers: getAuthHeaders(),
+  })
+  return response.data
+}
+
+export const verifyContactOtp = async (code: string): Promise<ContactOtpVerifyResult> => {
+  const response = await api.post(
+    '/v1/verification/contact/otp/verify',
+    { code },
+    { headers: getAuthHeaders() }
+  )
   return response.data
 }
 

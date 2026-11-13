@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import toast from 'react-hot-toast'
 import { useLocation, Link } from 'react-router-dom'
-import api, { updateCandidateProfile, getCandidateProfile } from '../../services/api'
+import api, { updateCandidateProfile, getCandidateProfile, fetchContactStatus, sendContactOtp, verifyContactOtp, type ContactVerificationStatus } from '../../services/api'
 import FormInput from '../../components/FormInput'
 import SalaryRangeInput from '../../components/SalaryRangeInput'
 import { useAuth } from '../../context/AuthContext'
@@ -15,6 +15,14 @@ export default function CandidateProfile() {
   const [isEditing, setIsEditing] = useState(false)
   const [savedProfile, setSavedProfile] = useState<any>(null)
   const [identityRecord, setIdentityRecord] = useState<any>(null)
+  // Contact verification (email OTP) — only for independent / unplaced candidates.
+  const [contactEligible, setContactEligible] = useState(false)
+  const [contactStatus, setContactStatus] = useState<ContactVerificationStatus | null>(null)
+  const [contactOtpSent, setContactOtpSent] = useState(false)
+  const [contactCode, setContactCode] = useState('')
+  const [contactBusy, setContactBusy] = useState<'send' | 'verify' | null>(null)
+  const [contactCooldown, setContactCooldown] = useState(0)
+  const [contactNotice, setContactNotice] = useState<{ kind: 'success' | 'error' | 'warn'; text: string } | null>(null)
   const [resumeFileName, setResumeFileName] = useState<string | null>(null)
   const [formData, setFormData] = useState({
     name: '',
@@ -126,7 +134,7 @@ export default function CandidateProfile() {
     } else {
       setProfileLoading(false)
     }
-  }, [user, location.pathname, loadProfile]) // Reload when route changes or user changes
+  }, [user?.id, location.pathname, loadProfile]) // Stable id only — not the user object
 
   // Reload profile when tab becomes visible or window gets focus (user switches back)
   useEffect(() => {
@@ -156,7 +164,7 @@ export default function CandidateProfile() {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       window.removeEventListener('focus', handleFocus)
     }
-  }, [user, isEditing, loadProfile])
+  }, [user?.id, isEditing, loadProfile])
 
 
   // Fetch canonical identity record from Sampada Gateway with Abhiruchi intake fallback
@@ -219,7 +227,140 @@ export default function CandidateProfile() {
       }
     }
     fetchIdentity()
-  }, [user])
+  }, [user?.id, user?.email])
+
+  // Contact verification status (email OTP). Depend on stable primitives only —
+  // a `user` object ref in the dep array re-fetched status every context change.
+  const contactUserId = user?.id ?? null
+  const contactIsGuest = user?.isGuest === true
+  useEffect(() => {
+    let cancelled = false
+    const loadContact = async () => {
+      if (contactIsGuest) {
+        setContactEligible(false)
+        setContactStatus(null)
+        return // guest preview has no candidate profile — no request to make
+      }
+      try {
+        const status = await fetchContactStatus()
+        if (cancelled) return
+        setContactStatus(status)
+        setContactEligible(status.eligible === true)
+        if (!status.eligible) {
+          setContactOtpSent(false)
+          setContactCode('')
+          setContactNotice(null)
+          return
+        }
+        if (status.status === 'CONTACT_VERIFIED') {
+          setContactNotice({
+            kind: 'success',
+            text: `Contact verified — ${status.email_masked || 'your email'} was confirmed with a one-time code.`,
+          })
+          setContactOtpSent(false)
+          setContactCode('')
+        } else {
+          setContactNotice(null)
+        }
+      } catch (e) {
+        console.warn('Contact status fetch failed:', e)
+        if (!cancelled) {
+          setContactEligible(false)
+          setContactNotice({
+            kind: 'warn',
+            text: 'Could not load contact verification status — refresh the page to try again.',
+          })
+        }
+      }
+    }
+    loadContact()
+    return () => {
+      cancelled = true
+    }
+  }, [contactUserId, contactIsGuest])
+
+  // Resend cooldown countdown (1 minute after a send).
+  useEffect(() => {
+    if (contactCooldown <= 0) return
+    const t = setTimeout(() => setContactCooldown((c) => Math.max(0, c - 1)), 1000)
+    return () => clearTimeout(t)
+  }, [contactCooldown])
+
+  const handleSendOtp = async () => {
+    if (user?.isGuest) {
+      const msg = 'Guest preview — sign in to verify your contact email'
+      setContactNotice({ kind: 'error', text: msg })
+      toast.error(msg)
+      return
+    }
+    if (contactBusy || contactCooldown > 0) return
+    setContactBusy('send')
+    try {
+      const result = await sendContactOtp()
+      setContactOtpSent(true)
+      setContactCode('')
+      setContactNotice({ kind: 'success', text: result.message || `Code sent to ${result.email_masked}.` })
+      setContactCooldown(60)
+      toast.success('Verification code sent')
+    } catch (err: any) {
+      console.error('Contact OTP send error:', err)
+      const detail = err?.response?.data?.detail
+      const msg =
+        err?.code === 'ECONNABORTED' || /timeout/i.test(String(err?.message || ''))
+          ? 'Sending the code timed out — check your connection and try again.'
+          : typeof detail === 'string'
+            ? detail
+            : `Could not send the code${err?.message ? ` (${err.message})` : ''}. Please try again.`
+      setContactNotice({ kind: 'error', text: msg })
+      toast.error(msg)
+    } finally {
+      setContactBusy(null)
+    }
+  }
+
+  const handleVerifyOtp = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (user?.isGuest) {
+      const msg = 'Guest preview — sign in to verify your contact email'
+      setContactNotice({ kind: 'error', text: msg })
+      toast.error(msg)
+      return
+    }
+    const code = contactCode.trim()
+    if (!/^\d{6}$/.test(code)) {
+      setContactNotice({ kind: 'warn', text: 'Enter the 6-digit code from your email.' })
+      return
+    }
+    if (contactBusy) return
+    setContactBusy('verify')
+    try {
+      const result = await verifyContactOtp(code)
+      setContactStatus((prev) => ({
+        candidate_id: prev?.candidate_id ?? contactStatus?.candidate_id ?? '',
+        eligible: true,
+        reason: null,
+        status: result.status,
+        email_masked: prev?.email_masked ?? contactStatus?.email_masked ?? null,
+        verified_at: result.verified_at ?? new Date().toISOString(),
+        method: 'email-otp',
+      }))
+      setContactNotice({ kind: 'success', text: result.message || 'Contact verified.' })
+      setContactOtpSent(false)
+      setContactCode('')
+      toast.success('Contact verified')
+    } catch (err: any) {
+      console.error('Contact OTP verify error:', err)
+      const detail = err?.response?.data?.detail
+      const msg =
+        typeof detail === 'string'
+          ? detail
+          : `Verification failed${err?.message ? ` (${err.message})` : ''}. Please try again.`
+      setContactNotice({ kind: 'error', text: msg })
+      toast.error(msg)
+    } finally {
+      setContactBusy(null)
+    }
+  }
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     setFormData({ ...formData, [e.target.name]: e.target.value })
@@ -432,6 +573,125 @@ export default function CandidateProfile() {
           </div>
         </div>
       </div>
+
+      {/* Contact Verification (email OTP) — independent candidates only.
+          Hired / placed candidates: eligible=false → card hidden entirely. */}
+      {contactEligible && (
+        <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-sm border border-gray-100 dark:border-slate-700">
+          <h2 className="section-title flex items-center gap-2">
+            <svg className="w-6 h-6 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-.34-.016-.68-.048-1.016z" />
+            </svg>
+            Contact Verification
+          </h2>
+
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mt-4">
+            <div className="space-y-2">
+              {contactStatus?.status === 'CONTACT_VERIFIED' ? (
+                <span className="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-semibold bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded-xl border border-emerald-500/30">
+                  ✓ Contact verified — email confirmed with one-time code
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-semibold bg-gray-100 dark:bg-slate-700 text-gray-600 dark:text-gray-300 rounded-xl border border-gray-200 dark:border-slate-600">
+                  Not verified
+                </span>
+              )}
+              {contactStatus?.email_masked && (
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  Profile email: {contactStatus.email_masked}
+                </p>
+              )}
+              {contactStatus?.verified_at && (
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  Verified at: {new Date(contactStatus.verified_at).toLocaleString()}
+                </p>
+              )}
+            </div>
+
+            {user?.isGuest ? (
+              <p className="text-sm text-gray-500 dark:text-gray-400 border border-dashed border-gray-300 dark:border-slate-600 px-5 py-2.5 rounded-xl shrink-0 text-center max-w-xs">
+                Guest preview —{' '}
+                <Link to="/auth" className="text-blue-600 dark:text-blue-300 font-semibold hover:underline">
+                  sign in
+                </Link>{' '}
+                to verify your contact email
+              </p>
+            ) : contactStatus?.status !== 'CONTACT_VERIFIED' ? (
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleSendOtp}
+                  disabled={contactBusy !== null || contactCooldown > 0}
+                  className={`border border-blue-500/40 text-blue-600 dark:text-blue-300 px-5 py-2.5 rounded-xl font-semibold hover:bg-blue-50 dark:hover:bg-blue-500/10 transition-all duration-300 flex items-center justify-center gap-2 ${
+                    contactBusy !== null || contactCooldown > 0 ? 'opacity-60 cursor-wait' : 'cursor-pointer'
+                  }`}
+                >
+                  {contactBusy === 'send'
+                    ? 'Sending…'
+                    : contactCooldown > 0
+                      ? `Resend in ${contactCooldown}s`
+                      : contactOtpSent
+                        ? 'Resend code'
+                        : 'Send code'}
+                </button>
+                {contactOtpSent && (
+                  <form onSubmit={handleVerifyOtp} className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      maxLength={6}
+                      placeholder="6-digit code"
+                      value={contactCode}
+                      onChange={(e) => setContactCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                      className="w-36 px-3 py-2.5 rounded-xl border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-gray-900 dark:text-white font-mono tracking-widest text-center focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+                      aria-label="6-digit verification code"
+                    />
+                    <button
+                      type="submit"
+                      disabled={contactBusy !== null || contactCode.length !== 6}
+                      className={`bg-gradient-to-r from-blue-500 to-cyan-600 hover:from-blue-600 hover:to-cyan-700 text-white px-5 py-2.5 rounded-xl font-semibold transition-all duration-300 shadow-lg shadow-blue-500/20 ${
+                        contactBusy !== null || contactCode.length !== 6 ? 'opacity-60 cursor-wait' : ''
+                      }`}
+                    >
+                      {contactBusy === 'verify' ? 'Verifying…' : 'Verify'}
+                    </button>
+                  </form>
+                )}
+              </div>
+            ) : null}
+          </div>
+
+          {contactNotice && (
+            <div
+              role="status"
+              className={`mt-4 flex items-start justify-between gap-3 rounded-xl border px-4 py-3 text-sm font-medium ${
+                contactNotice.kind === 'success'
+                  ? 'border-emerald-500/40 bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-300'
+                  : contactNotice.kind === 'warn'
+                    ? 'border-amber-500/40 bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-300'
+                    : 'border-red-500/40 bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-300'
+              }`}
+            >
+              <span>{contactNotice.text}</span>
+              <button
+                type="button"
+                aria-label="Dismiss"
+                onClick={() => setContactNotice(null)}
+                className="shrink-0 leading-none text-lg opacity-60 hover:opacity-100"
+              >
+                ×
+              </button>
+            </div>
+          )}
+
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-4">
+            Independent candidates: confirm the email on your profile with a one-time code
+            (valid for 10 minutes). This is contact verification only — it is not an ID
+            document check, and hired or placed candidates do not need it.
+          </p>
+        </div>
+      )}
 
       {/* Profile Info Section */}
       {!isEditing && (

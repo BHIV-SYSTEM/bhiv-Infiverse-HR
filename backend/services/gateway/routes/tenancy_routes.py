@@ -77,6 +77,8 @@ async def _ensure_indexes(db) -> None:
         await db.tenants.create_index([("tenant_id", 1)], unique=True)
         await db.tenants.create_index([("client_ids", 1)])
         await db.platform_admins.create_index([("email", 1)], unique=True)
+        await db.tenant_invites.create_index([("token", 1)], unique=True)
+        await db.tenant_invites.create_index([("tenant_id", 1), ("created_at", -1)])
     except Exception as exc:  # indexes are an optimization, never a blocker
         import logging
 
@@ -691,6 +693,269 @@ async def admin_unlink_client(tenant_id: str, body: LinkClient, auth=Depends(get
         context={"tenant_id": tenant_id, "client_id": cid},
     )
     return {"success": True, "tenant_id": tenant_id, "client_id": cid}
+
+
+# ── tenanted invite links (share access; single-use, 7-day expiry) ────────────
+#
+# The central admin never creates credentials FOR another company. It mints a
+# shareable link; the recipient opens it and creates their OWN Client-Portal
+# account, which is attached to the tenant node in the same transaction. From
+# there the tenant provisions its own downstream accounts (Sub-Clients page for
+# key accounts, connection_id sharing for HR/recruiters, jobs for candidates).
+
+INVITE_DEFAULT_TTL_HOURS = 168  # 7 days (product decision)
+INVITE_MAX_TTL_HOURS = 720  # 30 days hard cap
+
+
+class InviteCreate(BaseModel):
+    expires_in_hours: Optional[int] = Field(default=None, ge=1, le=INVITE_MAX_TTL_HOURS)
+
+
+class InviteRegister(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=8, max_length=128)
+    company_name: str = Field(min_length=1, max_length=200)
+
+
+def _iso(value: Any) -> Optional[str]:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value) if value else None
+
+
+def _invite_status(doc: Dict[str, Any], now: datetime) -> str:
+    if doc.get("revoked"):
+        return "revoked"
+    if doc.get("used_at"):
+        return "used"
+    expires_at = doc.get("expires_at")
+    if isinstance(expires_at, datetime):
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= now:
+            return "expired"
+    return "active"
+
+
+def _serialize_invite(doc: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
+    now = now or _now()
+    token = str(doc.get("token") or "")
+    return {
+        "token": token,
+        "invite_path": f"/invite/{token}",
+        "tenant_id": str(doc.get("tenant_id") or ""),
+        "status": _invite_status(doc, now),
+        "created_by": str(doc.get("created_by") or ""),
+        "created_at": _iso(doc.get("created_at")),
+        "expires_at": _iso(doc.get("expires_at")),
+        "used_at": _iso(doc.get("used_at")),
+        "used_by_client_id": str(doc.get("used_by_client_id") or "") or None,
+        "revoked": bool(doc.get("revoked")),
+    }
+
+
+@router.post("/v1/admin/tenants/{tenant_id}/invites", status_code=201)
+async def admin_create_tenant_invite(
+    tenant_id: str,
+    body: InviteCreate,
+    auth=Depends(get_admin_auth),
+):
+    """Mint a single-use, shareable tenanted invite link (default 7 days).
+
+    The recipient — not the admin — creates the account through this link.
+    """
+    db = await get_mongo_db()
+    await _ensure_indexes(db)
+    tenant = await db.tenants.find_one({"tenant_id": tenant_id})
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    if str(tenant.get("status") or "active") != "active":
+        raise HTTPException(
+            status_code=400, detail="Suspended tenants cannot issue invite links"
+        )
+
+    now = _now()
+    ttl_hours = int(body.expires_in_hours or INVITE_DEFAULT_TTL_HOURS)
+    doc = {
+        "token": secrets.token_urlsafe(32),
+        "tenant_id": tenant_id,
+        "created_by": str(auth.get("user_id") or auth.get("email") or ""),
+        "created_at": now,
+        "expires_at": now + timedelta(hours=ttl_hours),
+        "used_at": None,
+        "used_by_client_id": None,
+        "revoked": False,
+    }
+    await db.tenant_invites.insert_one(doc)
+    await _audit(
+        db,
+        action="tenant_invite_create",
+        outcome="success",
+        auth=auth,
+        context={"tenant_id": tenant_id, "ttl_hours": ttl_hours},
+    )
+    return {"success": True, "invite": _serialize_invite(doc, now)}
+
+
+@router.get("/v1/admin/tenants/{tenant_id}/invites")
+async def admin_list_tenant_invites(tenant_id: str, auth=Depends(get_admin_auth)):
+    """All invite links for a tenant (status: active/used/expired/revoked) so
+    the admin can re-copy or re-share without opening the database."""
+    db = await get_mongo_db()
+    if not await db.tenants.find_one({"tenant_id": tenant_id}):
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    now = _now()
+    cursor = db.tenant_invites.find({"tenant_id": tenant_id}).sort("created_at", -1)
+    docs = await cursor.to_list(length=200)
+    return {"success": True, "invites": [_serialize_invite(d, now) for d in docs]}
+
+
+@router.post("/v1/admin/tenants/{tenant_id}/invites/{token}/revoke")
+async def admin_revoke_tenant_invite(
+    tenant_id: str,
+    token: str,
+    auth=Depends(get_admin_auth),
+):
+    db = await get_mongo_db()
+    result = await db.tenant_invites.update_one(
+        {"tenant_id": tenant_id, "token": token},
+        {"$set": {"revoked": True}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Invite link not found")
+    await _audit(
+        db,
+        action="tenant_invite_revoke",
+        outcome="success",
+        auth=auth,
+        context={"tenant_id": tenant_id},
+    )
+    return {"success": True, "revoked": True}
+
+
+@router.get("/v1/invite/{token}", summary="Public: what this invite link offers")
+async def invite_info(token: str):
+    """Public (unauthenticated). Leaks only the tenant's display name/level —
+    never client ids, member lists or any tenant data."""
+    db = await get_mongo_db()
+    doc = await db.tenant_invites.find_one({"token": token})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Invite link not found")
+    now = _now()
+    status = _invite_status(doc, now)
+    if status in ("revoked", "used"):
+        raise HTTPException(status_code=404, detail="Invite link is no longer valid")
+    if status == "expired":
+        raise HTTPException(status_code=410, detail="Invite link has expired")
+    tenant = await db.tenants.find_one({"tenant_id": doc.get("tenant_id")})
+    if not tenant or str(tenant.get("status") or "active") != "active":
+        raise HTTPException(status_code=404, detail="Invite link is no longer valid")
+    return {
+        "success": True,
+        "invite": {
+            "tenant": {
+                "name": str(tenant.get("name") or ""),
+                "level": str(tenant.get("level") or ""),
+            },
+            "expires_at": _iso(doc.get("expires_at")),
+        },
+    }
+
+
+@router.post("/v1/invite/{token}/register", status_code=201)
+async def invite_register(token: str, body: InviteRegister):
+    """Public (unauthenticated): redeem a tenanted invite link.
+
+    Single-use (atomic claim before any write), 7-day expiry, tenant must be
+    active. Creates the recipient's OWN Client-Portal account and attaches it
+    to the tenant node in the same call — the admin never handles their
+    credentials.
+    """
+    db = await get_mongo_db()
+    await _ensure_indexes(db)
+    doc = await db.tenant_invites.find_one({"token": token})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Invite link not found")
+    now = _now()
+    status = _invite_status(doc, now)
+    if status in ("revoked", "used"):
+        raise HTTPException(status_code=404, detail="Invite link is no longer valid")
+    if status == "expired":
+        raise HTTPException(status_code=410, detail="Invite link has expired")
+
+    tenant_id = str(doc.get("tenant_id") or "")
+    tenant = await db.tenants.find_one({"tenant_id": tenant_id})
+    if not tenant or str(tenant.get("status") or "active") != "active":
+        raise HTTPException(status_code=404, detail="Invite link is no longer valid")
+    tenant_name = str(tenant.get("name") or "")
+
+    email = str(body.email or "").strip().lower()
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="A valid email is required")
+
+    # Atomic single-use claim — two concurrent redemptions can never both win.
+    claim = await db.tenant_invites.update_one(
+        {
+            "token": token,
+            "used_at": None,
+            "revoked": {"$ne": True},
+            "expires_at": {"$gt": now},
+            "tenant_id": tenant_id,
+        },
+        {"$set": {"used_at": now}},
+    )
+    if claim.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Invite link is no longer valid")
+
+    try:
+        provisioned = await _provision_client_portal(
+            db,
+            ClientProvision(
+                email=email, password=body.password, company_name=body.company_name
+            ),
+            tenant_name,
+        )
+    except HTTPException:
+        # A failed registration must not burn the single-use link.
+        await db.tenant_invites.update_one(
+            {"token": token}, {"$set": {"used_at": None}}
+        )
+        raise
+
+    client_id = str(provisioned.get("client_id") or "")
+    link = await db.tenants.update_one(
+        {"tenant_id": tenant_id},
+        {"$addToSet": {"client_ids": client_id}, "$set": {"updated_at": now}},
+    )
+    if link.matched_count == 0:  # tenant vanished mid-flight: roll back hard
+        await db.clients.delete_one({"client_id": client_id})
+        await db.tenant_invites.update_one(
+            {"token": token}, {"$set": {"used_at": None}}
+        )
+        raise HTTPException(status_code=404, detail="Invite link is no longer valid")
+    await db.tenant_invites.update_one(
+        {"token": token}, {"$set": {"used_by_client_id": client_id}}
+    )
+    await _refresh_registry(db)
+    await _audit(
+        db,
+        action="tenant_invite_register",
+        outcome="success",
+        auth={"user_id": client_id, "role": "client", "type": "jwt_token"},
+        context={"tenant_id": tenant_id, "client_id": client_id, "email": email},
+    )
+    # Never echo the password back (the recipient set it themselves).
+    account = {
+        k: v
+        for k, v in provisioned.items()
+        if k not in ("password", "generated_password")
+    }
+    return {
+        "success": True,
+        "tenant": {"tenant_id": tenant_id, "name": tenant_name},
+        "client_account": account,
+        "message": "Account created. You can now sign in and invite your HR team and candidates.",
+    }
 
 
 # ── key account (e.g. SVA): its own tenanted subset ──────────────────────────

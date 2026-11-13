@@ -71,6 +71,17 @@ After sign-in the admin lands on `/admin/tenants`; the Control Center remains at
 | GET | `/v1/tenant/info` | client | Caller's placement: linked, level, key-account flag, visible ids |
 | GET | `/v1/tenant/sub-clients` | key account | The clients inside the caller's subset |
 | POST | `/v1/tenant/sub-clients` | key account | Create a client inside the caller's subset (+ CP login) |
+| POST | `/v1/admin/tenants/{tenant_id}/invites` | admin | Create single-use share link (default TTL 168 h, clamp 1–720 h) |
+| GET | `/v1/admin/tenants/{tenant_id}/invites` | admin | List invites (status only — never passwords) |
+| POST | `/v1/admin/tenants/{tenant_id}/invites/{token}/revoke` | admin | Revoke an unused invite |
+| GET | `/v1/invite/{token}` | none (token) | Invite info — 404 unknown, 410 expired/revoked/used |
+| POST | `/v1/invite/{token}/register` | none (token) | Register the company account — atomic single-use claim |
+
+Share links are created from **`/admin/tenants`** (Share link button per key account)
+and redeemed at **`/invite/:token`** (`InviteSignupPage.tsx`), which signs the new
+company straight in. Single-use: an atomic claim marks the token used before
+provisioning, with rollback if provisioning fails (so a failed attempt can be
+retried; an existing-account 409 does not burn the link).
 
 Every mutation writes a `control_center` audit event (`tenant_create`, `tenant_link_client`, …) so
 the change is visible in the Control Center timeline.
@@ -95,7 +106,11 @@ Guarantees enforced by the code:
    cannot create accounts outside its own boundary.
 3. Non-key accounts (plain clients) receive `403` from `/v1/tenant/sub-clients*`.
 4. Client-role tokens receive `403` from every `/v1/admin/*` route; anonymous requests get `401`.
-5. If tenancy is not configured (empty `tenants` collection or database unavailable), the registry
+5. The central admin console is **accounts-only**: platform-admin JWTs get `401` from
+   `/v1/nda/admin/*` and `403` from NDA document/tenant endpoints — candidate NDA review
+   lives exclusively in the tenant company dashboard (`/client/ndas`, see
+   `07_AUTHENTICATION_AND_SECURITY.md` §8.3).
+6. If tenancy is not configured (empty `tenants` collection or database unavailable), the registry
    degrades to `[own client id]` — the pre-tenancy behaviour, so existing deployments are unaffected.
 
 ## 5. Configuration
@@ -160,11 +175,29 @@ frontend on the custom domain can call the gateway.
 Suspending a tenant is management metadata only. To actually block a tenant's login, set the linked
 `clients` document's `status` to anything other than `active` (the existing client-login check).
 
-## 8. Verification evidence (2026-11-03)
+## 8. Verification evidence
+
+### Updated 2026-11-12 (invite share links + tenancy NDA isolation)
 
 | Check | Command | Result |
 |-------|---------|--------|
-| New hierarchy/admin suite | `pytest backend/tests/gateway/test_tenant_hierarchy_admin.py` | **27 passed** |
+| Hierarchy suite incl. 5 invite tests | `pytest backend/tests/gateway/test_tenant_hierarchy_admin.py` | **36 passed** (within the combined run below) |
+| NDA suites (gate + tenancy isolation) | `pytest backend/tests/nda` | **53 passed** |
+| KYC + contact-verification suite | `pytest backend/tests/verification` | **39 passed** |
+| Combined regression run | `pytest backend/tests/{identity,nda,gateway,scripts,cv,pravesh,verification}` | **270 passed, 2 skipped, 0 failed** |
+| Frontend typecheck + build | `cd frontend && npm run build` | **passes** (`tsc && vite build`) |
+
+The hierarchy suite now re-syncs `jwt_auth` secrets at module import, so it passes in
+**any** pytest collection order (previously it only passed when collected before suites
+that import `jwt_auth` with an empty environment). Invite coverage: create/list/revoke
+(no password leakage), single-use register with rollback on failed provisioning,
+expired→410, TTL/validation, and authz (client 403 / anonymous 401 / cross-tenant 404).
+
+### Baseline (2026-11-03)
+
+| Check | Command | Result |
+|-------|---------|--------|
+| Hierarchy/admin suite (pre-invite) | `pytest backend/tests/gateway/test_tenant_hierarchy_admin.py` | **27 passed** |
 | Whole gateway suite (regression) | `pytest backend/tests/gateway` | **60 passed, 2 skipped, 0 failed** |
 | Real app route registration | OpenAPI introspection | all 6 tenancy paths present (180 total paths) |
 | Frontend typecheck + build | `cd frontend && npm run build` | **passes** (`tsc && vite build`) |

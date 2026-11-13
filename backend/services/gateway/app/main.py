@@ -370,7 +370,8 @@ except ImportError as e:
     print(f"WARNING: CV builder routes not available: {e}")
 
 # Candidate NDA gate — official template, upload + PyPDF2 auto-verification,
-# admin review fallback, and the enforcement helper used by gated endpoints.
+# tenant-company review (platform admin has no NDA access — tenancy audit),
+# and the enforcement helper used by gated endpoints.
 try:
     from app.nda import router as nda_router
 
@@ -378,6 +379,25 @@ try:
     print("NDA gate routes loaded")
 except ImportError as e:
     print(f"WARNING: NDA gate routes not available: {e}")
+
+# Identity/KYC verification — automated text + name match, honest
+# VERIFIED / REJECTED / UNVERIFIABLE verdicts (no OCR, no fake passes).
+try:
+    from app.verification import router as verification_router
+
+    app.include_router(verification_router, prefix="/v1")
+    print("Identity verification routes loaded")
+except ImportError as e:
+    print(f"WARNING: Identity verification routes not available: {e}")
+
+# Contact verification (email OTP) for independent / unplaced candidates.
+try:
+    from app.contact_verification import router as contact_verification_router
+
+    app.include_router(contact_verification_router, prefix="/v1")
+    print("Contact verification routes loaded")
+except ImportError as e:
+    print(f"WARNING: Contact verification routes not available: {e}")
 
 # ── Auth dependency resolution ─────────────────────────────────────────────────
 # Must be defined BEFORE any @app route that uses Depends(get_auth).

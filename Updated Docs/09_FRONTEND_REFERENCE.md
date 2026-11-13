@@ -36,7 +36,8 @@
 | `/control` | `ProtectedRoute` roles `client\|recruiter\|admin` | `ControlCenter` |
 | `/candidate/*` | `candidate` | `CandidateLayout`: `dashboard`, `profile`, `jobs`, `applied-jobs`, `interviews`, `tasks`, `tasks/:taskId`, `feedback` |
 | `/recruiter/*` | `recruiter` | `RecruiterLayout`: `create-job`, `upload-candidates`, `jobs`→Dashboard, `candidate-search`, `screening`→ApplicantsMatching, `applicants/:jobId`, `schedule-interview`, `values-assessment`, `feedback/:candidateId`, `export-reports`, `client-jobs`, `batch-operations`, `automation`, `reports`→ExportReports |
-| `/client/*` | `client` | `ClientLayout`: `dashboard`, `jobs`, `candidates`, `matches`, `live-monitoring`, `reports` |
+| `/client/*` | `client` | `ClientLayout`: `dashboard`, `jobs`, `candidates`, `matches`, `live-monitoring`, `reports`, `ndas` |
+| `/invite/:token` | public (single-use invite token) | `InviteSignupPage` — redeem a tenant share link, auto sign-in as `client` |
 | `*` | fallback | → `/auth` |
 
 Protected-route behaviour: wrong-role access redirects to the correct dashboard; a loading gate
@@ -47,21 +48,24 @@ shows while auth state restores.
 ## 3. Pages (`src/pages/`)
 
 - **auth**: `AuthPage.tsx` (login/signup; role config redirects candidate→`/candidate/dashboard`,
-  recruiter→`/recruiter`, client→`/client`). `HRAuth.tsx` is empty (0 bytes).
+  recruiter→`/recruiter`, client→`/client`). `InviteSignupPage.tsx` (redeems `/invite/:token`
+  share links → auto client sign-in). `HRAuth.tsx` is empty (0 bytes).
 - **candidate**: `Dashboard`, `Profile`, `JobSearch`, `AppliedJobs` (status + document upload
   resume/nda), `Interviews`, `Tasks` (workflow bridge task list), `TaskDetail` (individual task detail & submission form), `Feedback`, `candidateTasksTypes.ts` (TypeScript type definitions).
 - **recruiter**: `Dashboard`, `JobCreation`, `ApplicantsMatching`, `FeedbackForm`,
   `AutomationPanel`, `CandidateSearch`, `BatchUpload` (wrapper), `BatchOperations`,
   `InterviewScheduling`, `ExportReports`, `ClientJobsMonitor`, `ValuesAssessment`.
 - **client**: `ClientDashboard`, `ClientJobPosting`, `ClientCandidates`, `MatchResults`,
-  `ClientReports`, `ShortlistReview`, `LiveRecruiterMonitoring`.
+  `ClientReports`, `ShortlistReview`, `LiveRecruiterMonitoring`, `NdaApprovalsPage`
+  (tenant-scoped NDA review at `/client/ndas`; the central-admin NDA page was removed —
+  see `07_AUTHENTICATION_AND_SECURITY.md` §8.3).
 - **control**: `ControlCenter.tsx` — executive/hiring/workforce/growth/org/governance/replay zones.
 - **hr**: `HRDashboard`, `CandidateManagement`, `AIMatching` — **all empty (0 bytes)**.
 - `RoleSelection.tsx` — 3 role cards → `/auth?mode=signup`.
 
 ---
 
-## 4. API Layer (`src/services/api.ts` — 2293 lines)
+## 4. API Layer (`src/services/api.ts` — 2717 lines)
 
 - One axios client; `API_BASE_URL` from `VITE_API_BASE_URL` (default `http://localhost:8000`).
 - `resolveServiceBaseUrl()` forces local ports (8000/9000/9001) in Vite dev on localhost even when

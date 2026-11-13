@@ -478,7 +478,7 @@ def test_admin_review_validates_decision_and_candidate(client, fake_db):
 
 def test_admin_endpoints_reject_candidates(client, fake_db):
     resp = client.get("/v1/nda/admin/queue", headers=bearer(CANDIDATE_ID))
-    assert resp.status_code == 403
+    assert resp.status_code == 401  # api_key-only dependency: generic rejection
 
 
 def test_admin_endpoints_reject_pravesh_sso_admin(client, fake_db, monkeypatch):
@@ -499,22 +499,24 @@ def test_admin_endpoints_reject_pravesh_sso_admin(client, fake_db, monkeypatch):
     )
     sso = {"X-Pravesh-Token": token}  # no Authorization header
 
-    assert client.get("/v1/nda/admin/queue", headers=sso).status_code == 403
+    # Queue/review are service api_key only → 401 (no admin path at all).
+    assert client.get("/v1/nda/admin/queue", headers=sso).status_code == 401
     assert (
         client.post(
             f"/v1/nda/admin/{CANDIDATE_ID}/review",
             headers=sso,
             json={"decision": "VERIFIED"},
         ).status_code
-        == 403
+        == 401
     )
     # Cross-candidate document read must not take the admin branch
     resp = client.get(f"/v1/nda/document?candidate_id={CANDIDATE_ID}", headers=sso)
     assert resp.status_code == 403
 
 
-def test_admin_endpoints_still_accept_platform_admin_jwt(client, fake_db, monkeypatch):
-    """Positive control: a real platform-admin JWT (JWT_SECRET_KEY) keeps access."""
+def test_admin_endpoints_reject_platform_admin_jwt(client, fake_db, monkeypatch):
+    """Tenancy audit: platform-admin JWT has NO NDA queue/review access —
+    NDA submissions are tenant-private; ops uses the service api_key."""
     import jwt_auth as _ja
 
     monkeypatch.setattr(_ja, "JWT_SECRET_KEY", "platform-admin-secret")
@@ -525,7 +527,20 @@ def test_admin_endpoints_still_accept_platform_admin_jwt(client, fake_db, monkey
         algorithm="HS256",
     )
     headers = {"Authorization": f"Bearer {token}"}
-    assert client.get("/v1/nda/admin/queue", headers=headers).status_code == 200
+    assert client.get("/v1/nda/admin/queue", headers=headers).status_code == 401
+    assert (
+        client.post(
+            f"/v1/nda/admin/{CANDIDATE_ID}/review",
+            headers=headers,
+            json={"decision": "VERIFIED"},
+        ).status_code
+        == 401
+    )
+    # ...and no cross-candidate document read either.
+    assert (
+        client.get(f"/v1/nda/document?candidate_id={CANDIDATE_ID}", headers=headers).status_code
+        == 403
+    )
 
 
 def test_reviewer_payload_field_is_ignored(client, fake_db):

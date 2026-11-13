@@ -70,7 +70,8 @@ The gateway is the **only** public API surface for the frontend. Verified respon
    - Candidate JWT (`CANDIDATE_JWT_SECRET_KEY`, HS256) → candidate/recruiter roles.
    - Client JWT (`JWT_SECRET_KEY`) → client/HR roles.
    - Role guards: `get_candidate_auth`, `get_recruiter_auth`, `get_client_auth`,
-     `get_admin_auth`, `get_optional_auth`, `require_role(...)`.
+     `get_admin_auth`, `get_optional_auth`, `require_role(...)`, plus the
+     service-only `get_service_auth` (API key; used by NDA admin ops + quarantine).
 2. **Input validation** — XSS/SQLi blocking; email/phone validation; password policy; CSP
    reporting; rate limiting; blocked-IP tracking (see `07_AUTHENTICATION_AND_SECURITY.md`).
 3. **Multi-tenant isolation** — client-scoped data access rules.
@@ -126,7 +127,7 @@ The gateway is the **only** public API surface for the frontend. Verified respon
 - **Primary store**: MongoDB Atlas, database `bhiv_hr`.
 - **Gateway**: Motor async client (pool `maxPoolSize=10`, `minPoolSize=2`) — `app/database.py`.
 - **Agent / LangGraph**: PyMongo sync clients.
-- **33 collections** extracted from source (full schema in `08_DATABASE.md`):
+- **34 collections** extracted from source (full schema in `08_DATABASE.md`):
   `application_documents, audit_logs, candidates, challenges, client_connected_recruiter,
   clients, decisions, departments, divisions, employees, feedback, interviews, job_applications,
   jobs, matching_cache, notification_logs, offers, organizations, policy_definitions,

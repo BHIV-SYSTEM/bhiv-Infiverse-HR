@@ -21,6 +21,8 @@ The gateway uses a **triple-layer** authentication scheme resolved by `get_auth`
 Role guards (imported from `dependencies.py`):
 - `get_candidate_auth`, `get_recruiter_auth`, `get_client_auth`, `get_admin_auth`,
   `get_optional_auth`, `require_role(...)`.
+- `get_service_auth` (in `jwt_auth.py`): API-key-only guard for internal
+  operations endpoints (service `api_key` or platform-admin JWT rejected — see 8.3/8.4).
 - Audience-validation fallbacks included for token compatibility.
 
 ### Client vs candidate login flows (verified)
@@ -65,7 +67,7 @@ AuthPage.tsx ─▶ AuthContext.signIn/signUp ─▶ authService.login/register
 |------|--------------------------------|
 | `candidate` | `/candidate/dashboard`, `/profile`, `/jobs`, `/applied-jobs`, `/interviews`, `/tasks`, `/tasks/:taskId`, `/feedback` |
 | `recruiter` | `/recruiter` (+ create-job, upload-candidates, jobs, candidate-search, screening, applicants/:jobId, schedule-interview, values-assessment, feedback/:candidateId, export-reports, client-jobs, batch-operations, automation, reports) |
-| `client` | `/client` (+ dashboard, jobs, candidates, matches, live-monitoring, reports) |
+| `client` | `/client` (+ dashboard, jobs, candidates, matches, live-monitoring, reports, ndas) |
 | `client\|recruiter\|admin` | `/control` (Control Center) |
 
 ---
@@ -156,27 +158,34 @@ silently resolved:
   restores the previous canonical status and unblocks publishing;
   `confirmed` keeps the record quarantined for data remediation.
 
-### 8.3 Candidate NDA gate
+### 8.3 Candidate NDA gate (tenant-scoped review)
 
 New candidates are walled behind a verified NDA (official template → sign +
-stamp → upload → auto-verify → admin fallback):
+stamp → upload → auto-verify → **hiring-company review**):
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
-| `GET /v1/nda/template` | any gateway auth | Official print-ready HTML NDA |
+| `GET /v1/nda/template` | any gateway auth | Official print-ready HTML NDA (from `NEW_BHIV_NDA.pdf`, clauses 1–9) |
 | `GET /v1/nda/status` | candidate | Status + verification evidence |
 | `POST /v1/nda/upload` | candidate | PDF upload, PyPDF2 auto-verification |
-| `GET /v1/nda/document` | own / admin | Download the on-file NDA |
-| `GET /v1/nda/admin/queue` | service/admin | Awaiting review |
-| `POST /v1/nda/admin/{id}/review` | service/admin | `VERIFIED` / `REJECTED` decision |
+| `GET /v1/nda/document` | api_key / own tenant company / own | Download the on-file NDA |
+| `GET /v1/nda/tenant/queue` | client (tenant) | Own-tenant subset awaiting review |
+| `POST /v1/nda/tenant/{candidate_id}/review` | client (tenant) | `VERIFIED` / `REJECTED` decision |
+| `GET /v1/nda/admin/queue`, `POST /v1/nda/admin/{id}/review` | service (`api_key`) | Ops/test automation only |
 
-Admin UI: **`/admin/ndas`** ("NDA Approvals" button in the tenant-console
-header, role `admin`) — lists the queue with verification evidence, opens the
-uploaded PDF, and approves/rejects with an optional note.
-
+- **Central admin has zero NDA access** (tenancy audit): platform-admin JWTs and
+  anonymous requests get **401** from `/v1/nda/admin/*`, and **403** from
+  document/tenant endpoints. Review decisions taken via tenant JWT are stamped
+  `tenant_override` (`admin_override` only via service `api_key`).
+- Review UI: **`/client/ndas`** ("NDA Approvals" in the company sidebar, role
+  `client`) — own-tenant queue with candidate names, PDF viewer, approve/reject.
 - Verdicts: `VERIFIED` (parses + signature/stamp marker + identity match),
-  `NEEDS_REVIEW` (scans or unconfirmed text — admin fallback), `REJECTED`
-  (not a usable PDF). Reasons are machine-readable in `verification.reasons`.
+  `NEEDS_REVIEW` (scans or unconfirmed text), `REJECTED` (not a usable PDF).
+  Reasons are machine-readable in `verification.reasons`.
+- **Auto-decision on upload**: a candidate with **no owning company** (no
+  applications → jobs link) is auto-`REJECTED` with
+  `auto_decision_unowned_needs_review` reasons; owned candidates keep
+  `NEEDS_REVIEW` until their company reviews.
 - **Enforcement** (`enforce_nda_gate`, 403 `NDA_NOT_VERIFIED`):
   `POST /v1/candidate/apply`, `PUT /v1/candidate/profile/{id}`,
   `POST /v1/candidate/applications/{id}/documents/{type}` (except the `nda`
@@ -185,13 +194,86 @@ uploaded PDF, and approves/rejects with an optional note.
 - **Bypasses**: non-candidate roles, demo guest sessions (`guest:*`),
   `NDA_GATE_ENABLED=false` (kill switch), and unconfigured-database dev mode.
 
+### 8.4 Tenant invite share links
+
+The central admin provisions company logins with **single-use, expiring share
+links** (accounts-only console — no candidate or NDA data crosses tenants):
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `POST /v1/admin/tenants/{tenant_id}/invites` | admin | Create invite (default TTL **168 h**, clamp 1–720 h) |
+| `GET /v1/admin/tenants/{tenant_id}/invites` | admin | List invites (status, never passwords) |
+| `POST /v1/admin/tenants/{tenant_id}/invites/{token}/revoke` | admin | Revoke an unused invite |
+| `GET /v1/invite/{token}` | none (token) | Invite info — **404** unknown, **410** expired/revoked/used |
+| `POST /v1/invite/{token}/register` | none (token) | Register the company account — atomic single-use claim |
+
+- Registration claims the token atomically before provisioning; failed
+  provisioning rolls the claim back so the link is only burned on success
+  (except an existing-account **409**, which does not burn the link).
+- Frontend: `/invite/:token` (`InviteSignupPage.tsx`) → auto sign-in as `client`;
+  share/revoke controls live in **`/admin/tenants`** per tenant key account.
+- Audit events: `tenant_invite_create`, `tenant_invite_revoke`,
+  `tenant_invite_register`.
+
+### 8.5 Contact verification + KYC (Workstream C)
+
+**Profile card (current): contact verification via email OTP** — independent
+candidates only. Hired / placed candidates (accepted/hired offer or owning
+client) get `eligible: false` and the card is hidden entirely.
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `GET /v1/verification/contact/status` | candidate | Eligibility + status + masked email |
+| `POST /v1/verification/contact/otp/send` | candidate | 6-digit code to profile email (1/60s, 5/hour) |
+| `POST /v1/verification/contact/otp/verify` | candidate | Match code → `CONTACT_VERIFIED` |
+
+- `app/contact_verification.py`: independent = no owning client
+  (`_candidate_owner_client_ids` empty) **and** no offer in
+  `accepted`/`hired`. Codes are SHA-256 hashed, 10-minute expiry, max 5
+  attempts; never returned by the API after send.
+- Transport: free **Gmail SMTP** (`GMAIL_EMAIL` + `GMAIL_APP_PASSWORD` in
+  `backend/.env`). Unconfigured → **503**, never a fake success.
+- Honest statuses: `NOT_VERIFIED` → `CONTACT_VERIFIED` (method `email-otp`).
+  This is **not** an ID-document check.
+- Frontend: Contact Verification card on **`/profile`**
+  (`pages/candidate/Profile.tsx`) — Send code + 6-digit input; hidden when
+  not eligible.
+
+**Legacy KYC document routes** (`app/verification.py`) remain mounted for
+tests/history (soft-retire) but the Profile card no longer calls them:
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `POST /v1/verification/kyc/document` | candidate | PDF/JPEG/PNG ≤ 5 MB upload |
+| `GET /v1/verification/kyc/status` | candidate | Current verdict (default `NOT_SUBMITTED`) |
+
+- `app/verification.py`: PyPDF2 text extraction (503 if PyPDF2 unavailable —
+  never a fake `REJECTED`) + normalized name match against the profile.
+- Verdicts: `VERIFIED` (text + name matched), `REJECTED` (name mismatch /
+  unparsable / encrypted / unsupported), `UNVERIFIABLE` (image-only upload or
+  scanned PDF with no extractable text → manual review). Reasons are
+  machine-readable in `verification.reasons`.
+- Result is persisted on the candidates document as `kyc` (missing profile → 404).
+
 ---
 
-## 9. Verification Evidence (2026-08-14)
+## 9. Verification Evidence (2026-08-14; extended 2026-11-12)
 
 - Unauthenticated protected endpoints returned **401** (candidate stats, langgraph workflows).
 - Invalid-credential logins returned `success:false` (auth guards functional).
 - Security test suites exist under `backend/tests/security/` (9 files) — see `10_TESTING_AND_EVIDENCE.md`.
+- **2026-11-12** (tenancy/NDA/KYC work): combined run of
+  `backend/tests/{identity,nda,gateway,scripts,cv,pravesh,verification}` →
+  **252 passed, 2 skipped, 0 failed** (`nda/` 53, `verification/` 21,
+  `test_tenant_hierarchy_admin.py` 36 incl. 5 invite tests); frontend
+  `npm run build` passes. Central-admin NDA rejection (401/403), invite
+  single-use/expiry behaviour, and KYC honest-verdict rules each have
+  dedicated tests (`nda/test_nda_tenancy.py`, `gateway/test_tenant_hierarchy_admin.py`,
+  `verification/test_kyc_verification.py`).
+- **2026-11-12** (contact verification): combined run extended →
+  **270 passed, 2 skipped, 0 failed** (`verification/` 39 = KYC 21 +
+  contact OTP 18: eligibility, rate-limit, expiry, honest statuses).
+  Frontend `npm run build` green.
 
 ---
 

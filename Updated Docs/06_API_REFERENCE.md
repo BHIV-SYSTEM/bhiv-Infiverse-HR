@@ -285,7 +285,51 @@ Interactive docs: `/docs` (Swagger) on every service.
 | DELETE | `/v1/candidate/workflow-link` | Delete workflow link |
 | GET | `/v1/candidate/workflow-tasks` | List tasks |
 | GET | `/v1/candidate/workflow-tasks/{task_id}` | Task detail |
-| POST | `/v1/candidate/workflow-tasks/{task_id}/submit` | Submit task |
+| POST | `/v1/candidate/workflow-tasks/{task_id}/submit` | Task submit |
+
+## 14A. Gateway — Tenancy Admin, Invites, NDA Gate & KYC (added 2026-11-12)
+
+Semantics, isolation rules and verdict definitions live in
+`07_AUTHENTICATION_AND_SECURITY.md` §8.3–8.5 and `17_TENANT_HIERARCHY_AND_ADMIN_ACCESS.md`.
+Core tenancy endpoints (`/v1/admin/login`, `/v1/admin/tenants*` CRUD, link/unlink,
+`/v1/tenant/*`) are tabulated in `17_...` §3 and are omitted here to avoid divergence.
+
+### Tenant invite share links
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| POST | `/v1/admin/tenants/{tenant_id}/invites` | admin | Create single-use invite (default TTL 168 h) |
+| GET | `/v1/admin/tenants/{tenant_id}/invites` | admin | List invites |
+| POST | `/v1/admin/tenants/{tenant_id}/invites/{token}/revoke` | admin | Revoke unused invite |
+| GET | `/v1/invite/{token}` | token | Invite info (404 unknown / 410 expired) |
+| POST | `/v1/invite/{token}/register` | token | Redeem — atomic single-use claim |
+
+### Candidate NDA gate (tenant-scoped review; central admin has no access)
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| GET | `/v1/nda/template` | any gateway auth | Official print-ready NDA HTML |
+| GET | `/v1/nda/status` | candidate | Status + verification evidence |
+| POST | `/v1/nda/upload` | candidate | PDF upload + PyPDF2 auto-verification |
+| GET | `/v1/nda/document` | api_key / own tenant / own | Download on-file NDA |
+| GET | `/v1/nda/tenant/queue` | client (tenant) | Own-tenant review queue |
+| POST | `/v1/nda/tenant/{candidate_id}/review` | client (tenant) | VERIFIED / REJECTED decision |
+| GET | `/v1/nda/admin/queue`, POST `/v1/nda/admin/{id}/review` | service (`api_key`) | Ops/test automation only (platform-admin JWT → 401) |
+
+### Contact verification (email OTP) — independent candidates only
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| GET | `/v1/verification/contact/status` | candidate | Eligibility + status + masked email (`eligible:false` when hired/placed) |
+| POST | `/v1/verification/contact/otp/send` | candidate | 6-digit code via Gmail SMTP (1/60s, 5/hour; never returns the code) |
+| POST | `/v1/verification/contact/otp/verify` | candidate | Match code → `CONTACT_VERIFIED` (max 5 attempts, 10 min TTL) |
+
+### KYC identity verification (legacy — soft-retired on Profile)
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| POST | `/v1/verification/kyc/document` | candidate | PDF/JPEG/PNG ≤ 5 MB upload |
+| GET | `/v1/verification/kyc/status` | candidate | Current verdict (NOT_SUBMITTED default) |
 
 ---
 
@@ -348,9 +392,15 @@ Interactive docs: `/docs` (Swagger) on every service.
 ## 17. Authentication Notes Per Endpoint
 
 - **Public reads**: `GET /health`, `GET /docs`, `GET /openapi.json`, `GET /v1/jobs`,
-  `GET /v1/jobs/autocomplete`, login/register endpoints.
+  `GET /v1/jobs/autocomplete`, login/register endpoints, and the invite-token endpoints
+  (`GET|POST /v1/invite/{token}` — guarded by token validity: 404 unknown, 410 expired).
 - **Protected**: everything else — via `get_auth` (API key or JWT) or role guards
   (`get_candidate_auth`, `get_recruiter_auth`, `get_client_auth`, `get_admin_auth`).
+- **Service-only** (`get_service_auth`, API key; platform-admin JWT rejected): `/v1/nda/admin/*`
+  and the identity-quarantine endpoints. **Candidate-only**: `/v1/verification/kyc/*`.
+- **Platform-admin only**: `/v1/admin/*` (client tokens 403, anonymous 401) — but note the
+  central admin has **no** NDA access (401 on `/v1/nda/admin/*` with an admin JWT; see
+  `07_...` §8.3).
 - Verified live: `GET /v1/candidates/stats` → 401 unauthenticated; `GET /langgraph/workflows`
   → 401 unauthenticated.
 
@@ -382,5 +432,8 @@ The endpoint inventory above was cross-verified through:
 2. **Code inspection** (2026-08-17): Direct source code analysis confirmed all endpoints in sections
    10–14 are present in `backend/services/gateway/app/main.py` and its mounted routers. No new
    endpoints were found beyond the 204 already documented.
-3. **Frontend cross-check**: `src/services/api.ts` (2293 lines) references all documented endpoints
-   plus 4 stale paths noted in section 18 (known issues).
+3. **Frontend cross-check**: `src/services/api.ts` (2717 lines as of 2026-11-12) references all
+   documented endpoints plus 4 stale paths noted in section 18 (known issues).
+4. **Added 2026-11-12** (section 14A): tenancy invite, NDA tenant-review and KYC endpoints are
+   new since the snapshots above — verified through their dedicated pytest suites rather than
+   a live OpenAPI pull (`10_TESTING_AND_EVIDENCE.md`, 252 passed).

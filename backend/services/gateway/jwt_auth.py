@@ -6,7 +6,7 @@ Validates JWT tokens from frontend
 import os
 import jwt
 import httpx
-from fastapi import HTTPException, Security, Request
+from fastapi import Depends, HTTPException, Security, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional, Dict, Any
 from functools import lru_cache
@@ -283,6 +283,22 @@ def get_service_or_admin_auth(
         status_code=403,
         detail="Service or platform-admin access required",
     )
+
+
+def get_service_auth(api_key: str = Depends(get_api_key)):
+    """Service (machine) principal ONLY.
+
+    Platform admins are deliberately NOT accepted: tenancy audit — NDA
+    submissions are a tenant's private data, so the central admin has no
+    right to read or review them. Ops tooling uses the API key (a machine
+    credential), never the admin session.
+    """
+    return {
+        "type": "api_key",
+        "role": "service",
+        "user_id": "service",
+        "credentials": api_key,
+    }
 
 
 def require_role(*allowed_roles: str):

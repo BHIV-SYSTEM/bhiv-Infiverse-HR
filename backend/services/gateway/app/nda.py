@@ -8,8 +8,12 @@ Flow:
      (``POST /v1/nda/upload``).
   3. The upload is auto-verified server-side with PyPDF2
      (``verify_nda_pdf``) → ``VERIFIED`` / ``NEEDS_REVIEW`` / ``REJECTED``.
-  4. ``NEEDS_REVIEW`` falls back to admin review
-     (``POST /v1/nda/admin/{candidate_id}/review``).
+  4. ``NEEDS_REVIEW`` is reviewed by the OWNING COMPANY
+     (``GET /v1/nda/tenant/queue`` + ``POST /v1/nda/tenant/{id}/review``,
+     company JWT, own tenant subset only). Platform admins have NO access
+     (tenancy audit) — ops uses the service api_key
+     (``/v1/nda/admin/*``). Unowned candidates are decided automatically
+     (NEEDS_REVIEW → REJECTED with machine-readable reasons).
   5. While status != ``VERIFIED``, candidate write/endpoints that carry the
      NDA obligation are blocked by ``enforce_nda_gate`` (403
      ``NDA_NOT_VERIFIED``): job application, profile update, non-NDA
@@ -19,7 +23,8 @@ Honesty rules:
 * Auto-verification only claims ``VERIFIED`` when the PDF parses, has pages,
   and carries text evidence of a signature/stamp plus the candidate's
   identity. Scanned/image-only PDFs are honestly reported as
-  ``NEEDS_REVIEW`` — never silently passed.
+  ``NEEDS_REVIEW`` (company subset) or auto-``REJECTED`` (unowned) —
+  never silently passed.
 * Every verdict carries machine-readable ``reasons``.
 
 Kill switch: ``NDA_GATE_ENABLED=false`` disables enforcement only
@@ -38,7 +43,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 
-from jwt_auth import get_auth, get_service_or_admin_auth
+from jwt_auth import get_auth, get_service_auth
 
 logger = logging.getLogger(__name__)
 
@@ -348,20 +353,26 @@ _NDA_TEMPLATE_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Non-Disclosure Agreement — BHIV Infiverse</title>
+<title>Non-Disclosure Agreement — BlackHole Infiverse LLP</title>
 <style>
   @page { size: A4; margin: 18mm; }
   body { font-family: Georgia, 'Times New Roman', serif; color: #111;
          max-width: 800px; margin: 24px auto; padding: 0 20px; line-height: 1.55; }
   h1 { text-align: center; font-size: 22px; letter-spacing: 2px; margin-bottom: 4px; }
+  h2 { font-size: 15px; margin: 22px 0 6px; }
   .sub { text-align: center; font-size: 12px; color: #555; margin-bottom: 22px; }
-  .party { margin: 14px 0; }
+  .party { margin: 14px 0; font-size: 14px; text-align: justify; }
   .fill { border-bottom: 1px solid #333; display: inline-block; min-width: 260px; }
   .clause { margin: 12px 0; text-align: justify; font-size: 14px; }
-  .sig { display: flex; justify-content: space-between; margin-top: 48px; }
-  .sig div { width: 45%; font-size: 13px; }
-  .line { border-bottom: 1px solid #333; height: 46px; margin-bottom: 6px; }
-  .stamp { margin-top: 10px; font-size: 12px; color: #555; }
+  .clause ul { margin: 6px 0 6px 22px; padding: 0; }
+  .clause li { margin: 3px 0; }
+  .notebox { border: 1px solid #333; padding: 10px 14px; margin: 14px 0;
+             font-size: 13.5px; text-align: justify; }
+  .sig { display: flex; justify-content: space-between; margin-top: 44px;
+         flex-wrap: wrap; gap: 10px; }
+  .sig > div { width: 46%; font-size: 13px; margin-bottom: 22px; }
+  .line { border-bottom: 1px solid #333; height: 40px; margin-bottom: 6px; }
+  .stamp { margin-top: 8px; font-size: 12px; color: #555; }
   footer { margin-top: 40px; font-size: 11px; color: #666; text-align: center; }
   .printbar { background:#f5f5f5; border:1px solid #ddd; padding:10px 14px;
               font-family: Arial, sans-serif; font-size:13px; margin-bottom:18px; }
@@ -371,69 +382,222 @@ _NDA_TEMPLATE_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="printbar">
-  Print or save this page as PDF (browser &#8594; Print &#8594; Save as PDF),
-  sign and stamp it, then upload it from your Sampada profile.
+  Fill the signature block at the end (Name, Role Applied For, Email,
+  College/Reference, Date &amp; Place), print or save this page as PDF
+  (browser &#8594; Print &#8594; Save as PDF), sign and stamp it, then upload
+  it from your Sampada profile.
   <button onclick="window.print()">Print / Save as PDF</button>
 </div>
 
-<h1>NON-DISCLOSURE AGREEMENT</h1>
-<div class="sub">BHIV Infiverse — Sampada Talent Platform &middot; Form NDA/v1</div>
+<h1>NON-DISCLOSURE AGREEMENT (NDA)</h1>
+<div class="sub">BlackHole Infiverse LLP &middot; Form NDA/BHIV-v2 &middot; mirrors NEW_BHIV_NDA</div>
 
 <div class="party">
-  Between <strong>BHIV Infiverse ("Discloser")</strong> and the undersigned
-  candidate (<strong>"Recipient"</strong>):<br><br>
-  Name: <span class="fill">&nbsp;</span><br><br>
-  Email: <span class="fill">&nbsp;</span><br><br>
-  Institute / Cohort: <span class="fill">&nbsp;</span>
+  This Agreement also referred to as NDA is entered into by and between:
+  <strong>BlackHole Infiverse LLP</strong>, a registered Limited Liability Partnership,
+  hereinafter referred to as the &ldquo;Disclosing Party&rdquo;, and the undersigned party,
+  hereinafter referred to as the &ldquo;Receiving Party&rdquo;.<br><br>
+  Effective Date: Upon signing.
 </div>
 
-<div class="clause"><strong>1. Purpose.</strong> The Recipient is being
-evaluated for engagement opportunities via the Sampada platform and may
-access confidential information relating to BHIV Infiverse, its clients,
-candidates, job requirements, assessments and business plans.</div>
+<h2>1. PURPOSE</h2>
+<div class="clause">This Agreement governs the protection of confidential information
+exchanged in relation to all current and future projects undertaken by BlackHole
+Infiverse LLP, including but not limited to internal R&amp;D, experimental platforms,
+proprietary AI agents, GUIs, workflows, token systems, and digital products.</div>
 
-<div class="clause"><strong>2. Confidential Information.</strong> Includes all
-information disclosed in any form — oral, written, electronic or visual —
-that is marked confidential or would reasonably be understood to be
-confidential, including candidate data, client requirements, commercial terms
-and platform internals.</div>
+<h2>2. DEFINITION OF CONFIDENTIAL INFORMATION</h2>
+<div class="clause">&ldquo;Confidential Information&rdquo; includes, but is not limited to:
+<ul>
+  <li>All source code, scripts, prompts, data flows, model logic, system architecture,
+      training data, diagrams, UI/UX, and technical documentation</li>
+  <li>Product concepts, designs, prototypes, internal tools, agent logic, and business
+      strategies</li>
+  <li>Spoken or written communication, shared files, whiteboard sessions, or recorded
+      calls including the terms and details of this NON-DISCLOSURE AGREEMENT (NDA)</li>
+  <li>All visual, textual, or audio content developed or discussed under the purview of
+      any BlackHole Infiverse LLP project</li>
+</ul></div>
 
-<div class="clause"><strong>3. Obligations.</strong> The Recipient shall (a) use
-Confidential Information solely for the stated Purpose; (b) not disclose it to
-any third party; (c) protect it with at least reasonable care; and (d) not copy,
-reverse engineer or redistribute it.</div>
+<h2>3. OBLIGATIONS OF THE RECEIVING PARTY</h2>
+<div class="clause">The Receiving Party agrees to:
+<ul>
+  <li>Not disclose Confidential Information to any third party without prior written
+      consent from BlackHole Infiverse LLP</li>
+  <li>Not reuse, repurpose, copy, or replicate any component of the Confidential
+      Information, whether for commercial, educational, portfolio, freelance, or
+      research purposes</li>
+  <li>Not use Confidential Information to build or advise on competing platforms or
+      systems</li>
+  <li>Not share screenshots, screen recordings, visual demos, wireframes, or workflows
+      publicly or privately</li>
+  <li>Limit discussion of the work only to:
+    <ul>
+      <li>Tools/technologies used (e.g., Python, Power BI, React etc.)</li>
+      <li>Generic roles (e.g., &ldquo;worked as a AI Engineer with changing roles on
+          multiple tasks on confidential projects for an AI/Tech R&amp;D project under
+          NDA&rdquo;) without naming products, internal tools, datasets, or design
+          approaches</li>
+    </ul>
+  </li>
+</ul></div>
 
-<div class="clause"><strong>4. Exclusions.</strong> Obligations do not apply to
-information that is publicly available, independently developed, or already
-lawfully known to the Recipient without breach of this Agreement.</div>
+<h2>4. NON-CIRCUMVENTION</h2>
+<div class="clause">The Receiving Party agrees not to approach, contact, or work with
+any known clients, collaborators, partners, investors, or affiliates of BlackHole
+Infiverse LLP outside the scope of their assigned role or contract.</div>
 
-<div class="clause"><strong>5. Term.</strong> This Agreement is effective on
-signature and the obligations survive for three (3) years from the date of
-disclosure, or until terminated in writing by the Discloser.</div>
+<h2>5. NON-SOLICITATION</h2>
+<div class="clause">The Receiving Party shall not solicit, attempt to hire, or
+collaborate with any other interns, contractors, employees, or advisors of BlackHole
+Infiverse LLP for any external purpose for a period of two (2) years from the
+conclusion of this Agreement.</div>
 
-<div class="clause"><strong>6. Return of Information.</strong> Upon request, the
-Recipient shall promptly return or destroy all Confidential Information and
-certify such destruction in writing.</div>
+<h2>6. TERM AND SURVIVAL</h2>
+<div class="clause">This NDA shall be effective for a period of three (3) years
+following the conclusion of any active engagement, internship, or collaboration with
+BlackHole Infiverse LLP.</div>
 
-<div class="clause"><strong>7. Governing Law.</strong> This Agreement is governed
-by the laws of India, and disputes are subject to the exclusive jurisdiction of
-the courts of Maharashtra.</div>
+<h2>7. BREACH AND REMEDIES</h2>
+<div class="clause">Violation of this Agreement may result in:
+<ul>
+  <li>Immediate removal from all BlackHole Infiverse LLP projects</li>
+  <li>Legal claims for direct and indirect damages</li>
+  <li>Permanent blacklisting from all current and future engagements</li>
+  <li>Notification to associated institutions or partner organisations (if applicable)</li>
+</ul></div>
 
-<div class="sig">
+<h2>8. GOVERNING LAW</h2>
+<div class="clause">This Agreement shall be governed by and construed in accordance
+with the laws of India, but shall also apply globally to parties operating or residing
+in any other jurisdiction.</div>
+
+<h2>9. ENTIRE AGREEMENT</h2>
+<div class="clause">This Agreement constitutes the entire understanding between the
+parties and supersedes all prior discussions or written agreements relating to the
+subject matter herein.</div>
+
+<h2>Confidentiality &amp; Public Disclosure Restrictions</h2>
+
+<div class="clause">The Intern expressly acknowledges and agrees that, during the
+term of the internship and at all times thereafter, they shall maintain strict
+confidentiality and shall not, without prior written consent of Blackhole Infiverse
+LLP, directly or indirectly engage in any of the following activities:</div>
+
+<div class="clause"><strong>1. Prohibition on Public Disclosure.</strong> The Intern
+shall not post, publish, upload, distribute, transmit, display, or otherwise disclose,
+in any manner whatsoever, any information relating to the Company, including but not
+limited to:
+<ul>
+  <li>The Company&rsquo;s name, identity, or association</li>
+  <li>Projects, products, services, or research activities</li>
+  <li>Internal discussions, strategies, or communications</li>
+  <li>Client information, partner information, or business relationships</li>
+  <li>Any confidential or proprietary material</li>
+</ul>
+This restriction applies to all platforms including, but not limited to, LinkedIn,
+Instagram, Facebook, X (formerly Twitter), YouTube, WhatsApp, Telegram, personal
+blogs, podcasts, forums, or any other digital, electronic, or public medium.</div>
+
+<div class="clause"><strong>2. Restriction on Public Representation.</strong> The
+Intern shall not publicly represent, claim, or imply association with Blackhole
+Infiverse LLP in any capacity without prior written approval from the Company.
+This includes, but is not limited to:
+<ul>
+  <li>Updating employment or internship status on LinkedIn or similar platforms</li>
+  <li>Listing the Company in professional profiles, resumes, portfolios, or public
+      biographies</li>
+  <li>Making verbal or written claims of affiliation in public or professional
+      contexts</li>
+</ul></div>
+
+<div class="clause"><strong>3. Restriction on Sharing Visual or Digital Material.</strong>
+The Intern shall not capture, share, or distribute any Company-related content,
+including but not limited to:
+<ul>
+  <li>Photographs or videos of office premises</li>
+  <li>Screenshots, recordings, or system visuals</li>
+  <li>Code snippets, technical materials, or research data</li>
+  <li>Documents, presentations, or internal meeting materials</li>
+  <li>Any other Company-related visual or digital content</li>
+</ul>
+Such restriction applies irrespective of whether the platform is public or private.</div>
+
+<div class="clause"><strong>4. Restriction on Tagging and Association.</strong> The
+Intern shall not tag, mention, reference, or otherwise associate the Company&rsquo;s
+name, logo, brand identity, partners, clients, or representatives in any online or
+offline communication without prior written authorization from the Company.</div>
+
+<div class="clause"><strong>5. Survival of Obligations.</strong> All obligations
+contained in this section shall remain valid and enforceable during the internship
+period and shall survive termination, completion, or cessation of the internship for
+any reason.</div>
+
+<h2>Declaration Regarding Fees or Charges</h2>
+<div class="clause" style="font-style: italic; font-size: 13px;">
+(Optional but strongly recommended if relevant)</div>
+<div class="clause">The Intern hereby confirms and declares that:
+<ul>
+  <li>No fees, commissions, charges, or payments of any nature have been made by the
+      Intern to the Company, its employees, representatives, agents, or any third
+      party for obtaining this internship.</li>
+  <li>The internship opportunity has been accepted voluntarily and without any
+      financial inducement, promise, or guarantee.</li>
+  <li>The Intern shall not claim reimbursement or compensation for any alleged payment
+      made to any external agency or individual.</li>
+</ul></div>
+
+<div class="notebox"><strong>Note:</strong>
+<ul style="margin-bottom: 0;">
+  <li>Any individual hired as an Intern shall be eligible to receive an Internship
+      Completion Letter / Certificate upon successful completion of the mandatory
+      six (6) month internship period, subject to satisfactory performance and conduct.</li>
+  <li>In the event an Employee wishes to resign from the Company, a compulsory
+      thirty (30) days&rsquo; notice period must be duly served. Proper certification /
+      relieving documents shall be issued only upon successful completion of the
+      notice period and clearance of all obligations.</li>
+  <li>All interns, employees, and associated personnel are strictly prohibited from
+      posting, sharing, or disclosing any company-related, project-related,
+      client-related, or job-related information on social media or any public
+      platform without prior written approval from BlackHole Infiverse L.L.P.
+      Any unauthorized disclosure may result in disciplinary or legal action.</li>
+</ul></div>
+
+<div class="clause" style="margin-top: 30px;">
+  <strong>Signed By (Receiving Party) &amp; Stamp (if applicable):</strong>
+</div>
+
+<div class="sig" style="margin-top: 10px;">
   <div>
     <div class="line"></div>
-    Recipient Signature
-    <div class="stamp">Date: <span class="fill" style="min-width:120px">&nbsp;</span></div>
+    Name
   </div>
   <div>
     <div class="line"></div>
-    Recipient Name &amp; Company/Institute Stamp (if applicable)
-    <div class="stamp">Date: <span class="fill" style="min-width:120px">&nbsp;</span></div>
+    Role Applied For
+  </div>
+  <div>
+    <div class="line"></div>
+    Email
+  </div>
+  <div>
+    <div class="line"></div>
+    College/Reference
+  </div>
+  <div>
+    <div class="line"></div>
+    Date &amp; Place
+  </div>
+  <div>
+    <div class="line"></div>
+    Signature
   </div>
 </div>
 
-<footer>BHIV Infiverse — Official NDA template (Form NDA/v1) &middot;
-This document must be signed (and stamped where applicable) before upload.</footer>
+<footer>Form NDA/BHIV-v2 &mdash; faithful HTML rendering of NEW_BHIV_NDA.pdf
+(BlackHole Infiverse LLP) &middot; Fill the signature block (Name, Role Applied For,
+Email, College/Reference, Date &amp; Place), sign and stamp where applicable, then
+upload the signed copy from your Sampada profile.</footer>
 </body>
 </html>
 """
@@ -452,11 +616,104 @@ def _candidate_user_id(auth: Dict[str, Any]) -> str:
     if role != "candidate" and auth_type != "candidate_token":
         raise HTTPException(status_code=403, detail="Candidates only")
     user_id = str(
-        auth.get("user_id") or auth.get("candidate_id") or ""
+        auth.get("user_id") or auth.get("sub") or auth.get("candidate_id") or ""
     ).strip()
     if not user_id:
         raise HTTPException(status_code=403, detail="No candidate identity in token")
     return user_id
+
+
+# ---------------------------------------------------------------------------
+# Tenancy helpers (company-scoped NDA review)
+# ---------------------------------------------------------------------------
+
+
+def _require_client(auth: Dict[str, Any]) -> str:
+    """Company (Client-Portal) account identity for tenant-scoped NDA review.
+
+    Platform admins get 403 here by design: NDA submissions are a tenant's
+    private data — the central admin has no right to read or review them.
+    """
+    if auth.get("type") != "jwt_token" or auth.get("role") != "client":
+        raise HTTPException(
+            status_code=403,
+            detail="Company (client) account access required",
+        )
+    client_id = str(auth.get("user_id") or "").strip()
+    if not client_id:
+        raise HTTPException(status_code=401, detail="Client not identified")
+    return client_id
+
+
+async def _tenant_candidate_ids(db, client_id: str) -> set:
+    """Candidate ids inside the caller's tenanted subset.
+
+    Own + subtree clients + their connected recruiters' jobs, collected via
+    the dashboard governance helper, then resolved through job_applications.
+    Deterministic 10 000-entry cap keeps the in-set check bounded.
+    """
+    from app.control_center_governance import _client_all_job_ids_for_dashboard
+
+    client_id = str(client_id).strip()
+    if not client_id:
+        return set()
+    job_ids = await _client_all_job_ids_for_dashboard(db, client_id)
+    if not job_ids:
+        return set()
+    raw = await db.job_applications.distinct(
+        "candidate_id", {"job_id": {"$in": [str(j) for j in job_ids]}}
+    )
+    ids = {str(c).strip() for c in raw if str(c or "").strip()}
+    if not ids and client_id.isdigit():
+        raw = await db.job_applications.distinct(
+            "candidate_id", {"candidate_id": int(client_id)}
+        )
+    return set(sorted(ids)[:10000])
+
+
+async def _candidate_owner_client_ids(db, candidate_id: str) -> List[str]:
+    """Companies (client_ids) whose jobs this candidate applied to.
+
+    Empty list = independent/unowned candidate (system-driven path — no
+    human reviews their NDA anywhere).
+    """
+    from bson import ObjectId
+
+    cid = str(candidate_id or "").strip()
+    if not cid:
+        return []
+    job_raw = await db.job_applications.distinct("job_id", {"candidate_id": cid})
+    if not job_raw and cid.isdigit():
+        job_raw = await db.job_applications.distinct(
+            "job_id", {"candidate_id": int(cid)}
+        )
+    if not job_raw:
+        return []
+    str_ids = {str(j) for j in job_raw}
+    clauses: List[Dict[str, Any]] = []
+    oids = []
+    for j in sorted(str_ids):
+        if ObjectId.is_valid(j):
+            try:
+                oids.append(ObjectId(j))
+                continue
+            except Exception:
+                pass
+    if oids:
+        clauses.append({"_id": {"$in": oids}})
+    nums = [int(j) for j in str_ids if j.isdigit()]
+    if nums:
+        clauses.append({"_id": {"$in": nums}})
+    if not clauses:
+        return []
+    owners: List[str] = []
+    seen = set()
+    async for doc in db.jobs.find({"$or": clauses}, {"client_id": 1}):
+        owner = str(doc.get("client_id") or "").strip()
+        if owner and owner not in seen:
+            seen.add(owner)
+            owners.append(owner)
+    return owners
 
 
 @router.get("/template", summary="Official NDA template (print-ready HTML)")
@@ -526,6 +783,34 @@ async def upload_nda(
     now = datetime.now(timezone.utc)
     previous = await get_nda_record(db, candidate_id)
 
+    # System-driven decision (tenancy audit): a candidate OUTSIDE every
+    # company subset has no company to review their NDA — waiting on a
+    # human admin would either stall them forever or hand the platform
+    # admin access to data it must not have. So NEEDS_REVIEW for an
+    # UNOWNED candidate converts honestly to REJECTED with machine-readable
+    # reasons (scanned/image-only, missing marker, identity mismatch …).
+    # Candidates INSIDE a company subset keep NEEDS_REVIEW — the owning
+    # company reviews its own data on its own dashboard.
+    if verification.get("result") == NDA_STATUS_NEEDS_REVIEW:
+        try:
+            owners = await _candidate_owner_client_ids(db, candidate_id)
+        except Exception:
+            owners = None  # storage hiccup: keep NEEDS_REVIEW, never fabricate
+        if owners == []:
+            verification = dict(verification)
+            reasons = [str(r) for r in (verification.get("reasons") or [])]
+            reasons.append("auto_decision_unowned_needs_review")
+            reasons.append(
+                "independent_candidate_requires_text_verifiable_signature;"
+                "scanned_or_image_only_uploads_are_rejected_automatically"
+            )
+            verification["result"] = NDA_STATUS_REJECTED
+            verification["reasons"] = reasons
+            verification["auto_decision"] = "REJECTED"
+            verification["auto_decision_reason"] = (
+                "unowned_candidate_non_text_verifiable_nda"
+            )
+
     doc = {
         "candidate_id": candidate_id,
         "status": verification["result"],
@@ -555,7 +840,7 @@ async def upload_nda(
             "NDA verified — the platform is unlocked."
             if out["gate_passed"]
             else (
-                "Uploaded — an administrator will review it."
+                "Uploaded — your hiring company will review it."
                 if out["status"] == NDA_STATUS_NEEDS_REVIEW
                 else "Upload rejected — please re-upload a valid, signed NDA."
             )
@@ -563,7 +848,13 @@ async def upload_nda(
     }
 
 
-@router.get("/document", summary="Download my uploaded NDA (admin: ?candidate_id=)")
+@router.get(
+    "/document",
+    summary=(
+        "Download an uploaded NDA — candidate: own; company: ?candidate_id= "
+        "inside own tenant scope; service api_key: any (ops)"
+    ),
+)
 async def download_nda(
     candidate_id: Optional[str] = None,
     auth: dict = Depends(get_auth),
@@ -572,18 +863,39 @@ async def download_nda(
 
     role = str(auth.get("role") or "").strip().lower()
     auth_type = str(auth.get("type") or "").strip().lower()
-    if (role == "admin" and auth_type != "pravesh_sso") or auth_type == "api_key":
+
+    if auth_type == "api_key":
+        # Machine credential (ops/tests) — the ONLY cross-candidate path.
         target = (candidate_id or "").strip()
         if not target:
             raise HTTPException(
                 status_code=422, detail="candidate_id query param required"
             )
+        db = await get_mongo_db()
+    elif auth_type == "jwt_token" and role == "client":
+        # Company account: only candidates inside its own tenant subset.
+        target = (candidate_id or "").strip()
+        if not target:
+            raise HTTPException(
+                status_code=422, detail="candidate_id query param required"
+            )
+        db = await get_mongo_db()
+        client_id = _require_client(auth)
+        allowed = await _tenant_candidate_ids(db, client_id)
+        if target not in allowed:
+            raise HTTPException(
+                status_code=403,
+                detail="Candidate outside your company subset",
+            )
     else:
+        # Candidate (and platform-admin JWT, which simply resolves to its own
+        # no-candidate identity → 403/404): own document only. Platform
+        # admins have NO cross-candidate NDA read access (tenancy audit).
         target = _candidate_user_id(auth)
         if candidate_id and str(candidate_id) != target:
             raise HTTPException(status_code=403, detail="You can only view your own NDA")
+        db = await get_mongo_db()
 
-    db = await get_mongo_db()
     rec = await get_nda_record(db, target)
     if not rec or not (rec.get("document") or {}).get("file_base64"):
         raise HTTPException(status_code=404, detail="No NDA on file")
@@ -600,12 +912,67 @@ async def download_nda(
 
 
 # ---------------------------------------------------------------------------
-# Admin review (fallback for NEEDS_REVIEW / correction of REJECTED)
+# Review (service api_key for ops; tenant company for its own subset)
+# Platform admins are excluded from BOTH paths — tenancy audit.
 # ---------------------------------------------------------------------------
 
 
-@router.get("/admin/queue", summary="Submissions awaiting admin review")
-async def nda_admin_queue(auth: dict = Depends(get_service_or_admin_auth)):
+async def _apply_review(
+    db,
+    candidate_id: str,
+    decision: str,
+    note: Any,
+    auth: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Shared review application (service ops + tenant company).
+
+    ``reviewed_by`` is STRICTLY the authenticated principal — a spoofable
+    "reviewer" field in the payload is ignored.
+    """
+    collection = _nda_collection(db)
+    if collection is None:
+        raise HTTPException(status_code=503, detail="NDA storage unavailable")
+    rec = await get_nda_record(db, candidate_id)
+    if not rec:
+        raise HTTPException(
+            status_code=404, detail="No NDA submission for this candidate"
+        )
+
+    reviewer = str(auth.get("user_id") or auth.get("email") or "service")
+    now = datetime.now(timezone.utc)
+    update = {
+        "status": decision,
+        "review": {
+            "reviewed_by": reviewer,
+            "reviewed_at": now.isoformat(),
+            "decision": decision,
+            "note": str(note or "")[:500],
+        },
+        "updated_at": now,
+    }
+    # Manual review must override a conflicting auto-verdict honestly.
+    if rec.get("verification"):
+        verification = dict(rec["verification"])
+        if str(auth.get("type") or "") == "api_key":
+            verification["admin_override"] = decision
+            verification["admin_reviewed_at"] = now.isoformat()
+        else:
+            verification["tenant_override"] = decision
+            verification["tenant_reviewed_at"] = now.isoformat()
+        update["verification"] = verification
+
+    await collection.update_one({"candidate_id": candidate_id}, {"$set": update})
+    return {
+        "ok": True,
+        "candidate_id": candidate_id,
+        "status": decision,
+        "gate_passed": decision == NDA_STATUS_VERIFIED,
+        "reviewed_by": reviewer,
+    }
+
+
+@router.get("/admin/queue", summary="Review queue (service api_key only)")
+async def nda_admin_queue(auth: dict = Depends(get_service_auth)):
     from app.database import get_mongo_db
 
     db = await get_mongo_db()
@@ -643,53 +1010,114 @@ async def nda_admin_queue(auth: dict = Depends(get_service_or_admin_auth)):
     return {"queue": out, "count": len(out)}
 
 
-@router.post("/admin/{candidate_id}/review", summary="Admin decision: VERIFIED / REJECTED")
+@router.post("/admin/{candidate_id}/review", summary="Service decision: VERIFIED / REJECTED")
 async def nda_admin_review(
     candidate_id: str,
     payload: Dict[str, Any],
-    auth: dict = Depends(get_service_or_admin_auth),
+    auth: dict = Depends(get_service_auth),
 ):
-    from app.database import get_mongo_db
-
     decision = str(payload.get("decision") or "").strip().upper()
     if decision not in (NDA_STATUS_VERIFIED, NDA_STATUS_REJECTED):
         raise HTTPException(
             status_code=422, detail="decision must be 'VERIFIED' or 'REJECTED'"
         )
+    from app.database import get_mongo_db
+
+    db = await get_mongo_db()
+    return await _apply_review(db, candidate_id, decision, payload.get("note"), auth)
+
+
+# ---------------------------------------------------------------------------
+# Tenant company review — own subset only, no platform-admin access
+# ---------------------------------------------------------------------------
+
+
+@router.get("/tenant/queue", summary="Company NDA review queue (own tenant subset)")
+async def nda_tenant_queue(auth: dict = Depends(get_auth)):
+    """Company (Client-Portal) account sees ONLY candidates inside its own
+    tenant subset; every other company's submissions are unreachable."""
+    from app.database import get_mongo_db
+
+    client_id = _require_client(auth)
     db = await get_mongo_db()
     collection = _nda_collection(db)
     if collection is None:
-        raise HTTPException(status_code=503, detail="NDA storage unavailable")
-    rec = await get_nda_record(db, candidate_id)
-    if not rec:
-        raise HTTPException(status_code=404, detail="No NDA submission for this candidate")
+        return {"queue": [], "count": 0, "scope": "tenant"}
+    candidate_ids = await _tenant_candidate_ids(db, client_id)
+    if not candidate_ids:
+        return {"queue": [], "count": 0, "scope": "tenant"}
 
-    # Audit: reviewed_by is STRICTLY the authenticated principal — a
-    # spoofable "reviewer" field in the payload is ignored.
-    reviewer = str(auth.get("user_id") or auth.get("email") or "admin")
-    now = datetime.now(timezone.utc)
-    update = {
-        "status": decision,
-        "review": {
-            "reviewed_by": reviewer,
-            "reviewed_at": now.isoformat(),
-            "decision": decision,
-            "note": str(payload.get("note") or "")[:500],
+    # Display names, best effort (offline test fakes may lack candidates).
+    names: Dict[str, str] = {}
+    try:
+        from bson import ObjectId
+
+        oids = [ObjectId(c) for c in sorted(candidate_ids) if ObjectId.is_valid(c)]
+        cand = getattr(db, "candidates", None)
+        if cand is not None and oids:
+            async for d in cand.find({"_id": {"$in": oids}}, {"name": 1}):
+                names[str(d.get("_id"))] = str(d.get("name") or "")
+    except Exception:
+        names = {}
+
+    out = []
+    async for rec in collection.find(
+        {
+            "candidate_id": {"$in": sorted(candidate_ids)},
+            "status": {"$in": [NDA_STATUS_NEEDS_REVIEW, NDA_STATUS_REJECTED]},
         },
-        "updated_at": now,
-    }
-    # Manual review must override a conflicting auto-verdict honestly.
-    if rec.get("verification"):
-        rec["verification"] = dict(rec["verification"])
-        rec["verification"]["admin_override"] = decision
-        rec["verification"]["admin_reviewed_at"] = now.isoformat()
-        update["verification"] = rec["verification"]
+        {
+            "candidate_id": 1,
+            "status": 1,
+            "verification": 1,
+            "review": 1,
+            "document.filename": 1,
+            "document.size_bytes": 1,
+            "document.uploaded_at": 1,
+            "updated_at": 1,
+        },
+    ).sort("updated_at", -1).limit(200):
+        rec["_id"] = str(rec.get("_id") or "")
+        doc = rec.get("document") or {}
+        out.append(
+            {
+                "candidate_id": rec.get("candidate_id"),
+                "candidate_name": names.get(str(rec.get("candidate_id"))),
+                "status": rec.get("status"),
+                "verification": rec.get("verification"),
+                "review": rec.get("review"),
+                "filename": doc.get("filename"),
+                "size_bytes": doc.get("size_bytes"),
+                "uploaded_at": doc.get("uploaded_at"),
+                "updated_at": rec.get("updated_at").isoformat()
+                if isinstance(rec.get("updated_at"), datetime)
+                else rec.get("updated_at"),
+            }
+        )
+    return {"queue": out, "count": len(out), "scope": "tenant"}
 
-    await collection.update_one({"candidate_id": candidate_id}, {"$set": update})
-    return {
-        "ok": True,
-        "candidate_id": candidate_id,
-        "status": decision,
-        "gate_passed": decision == NDA_STATUS_VERIFIED,
-        "reviewed_by": reviewer,
-    }
+
+@router.post(
+    "/tenant/{candidate_id}/review",
+    summary="Company decision: VERIFIED / REJECTED (own candidates only)",
+)
+async def nda_tenant_review(
+    candidate_id: str,
+    payload: Dict[str, Any],
+    auth: dict = Depends(get_auth),
+):
+    decision = str(payload.get("decision") or "").strip().upper()
+    if decision not in (NDA_STATUS_VERIFIED, NDA_STATUS_REJECTED):
+        raise HTTPException(
+            status_code=422, detail="decision must be 'VERIFIED' or 'REJECTED'"
+        )
+    client_id = _require_client(auth)
+    from app.database import get_mongo_db
+
+    db = await get_mongo_db()
+    allowed = await _tenant_candidate_ids(db, client_id)
+    if str(candidate_id) not in allowed:
+        raise HTTPException(
+            status_code=403, detail="Candidate outside your company subset"
+        )
+    return await _apply_review(db, str(candidate_id), decision, payload.get("note"), auth)

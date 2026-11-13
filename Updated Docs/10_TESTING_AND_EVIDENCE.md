@@ -15,18 +15,24 @@
 | `agent/` | 8 | AI matching endpoints |
 | `api/` | 15 | Endpoint suites (comprehensive, 2FA, password, portals) |
 | `control_center/` | 6 | Control-center e2e (has its own `pytest.ini`) |
+| `cv/` | 1 | CV export gate integration |
 | `database/` | 3 | DB connectivity + portal DB tests |
 | `deployment/` | 5 | Deployment/health checks |
 | `e2e/control_center/` | — | E2E runner with fixtures (`e2e_config`, `e2e_reporter`, `env_preflight`, `live_services`) |
 | `fixes/` | 3 | Rectification/regression |
 | `framework/` | 7 | Test framework helpers |
-| `gateway/` | 12 | Gateway imports, routes, workforce, tenant isolation |
+| `gateway/` | 12 | Gateway imports, routes, workforce, tenant isolation, tenant hierarchy + admin + invites |
+| `identity/` | 1 | Identity/quarantine regression |
 | `integration/` | 4 | Cross-service flows |
 | `langgraph/` | 15 | LangGraph workflows, RL, notifications |
 | `misc/` | 34 | Assorted endpoint tests |
+| `nda/` | 2 | NDA gate verification + tenancy isolation (tenant queue/review, auto-decision, service-key access) |
+| `pravesh/` | 1 | Pravesh SSO bridge |
 | `rl_integration/` | 6 | RL engine |
+| `scripts/` | 1 | Candidate-linking script |
 | `security/` | 9 | Auth, 2FA, password, validation |
 | `validation/` | 10 | Localhost endpoint validation |
+| `verification/` | 2 | KYC honest verdicts (21) + contact-verification OTP rules (18) |
 | `workflows/` | 1 | Workflow tests |
 
 ---
@@ -57,6 +63,24 @@ cd backend
 ```
 
 **Verified 2026-08-14:** the above → **5 passed** in 2.35 s.
+
+### Tenancy / NDA / KYC / contact-OTP combined verification run (2026-11-12)
+
+```powershell
+# from the repository root
+.\backend\venv\Scripts\python.exe -m pytest backend/tests/identity backend/tests/nda `
+  backend/tests/gateway backend/tests/scripts backend/tests/cv backend/tests/pravesh `
+  backend/tests/verification -q
+```
+
+**Result: 270 passed, 2 skipped, 0 failed.** Highlights: `nda/` **53** (incl. 16 tenancy
+isolation tests), `verification/` **39** (KYC 21 + contact OTP 18: eligibility,
+rate-limit, expiry, honest statuses), `gateway/test_tenant_hierarchy_admin.py`
+**36** (incl. 5 invite-share-link tests). The hierarchy suite now re-syncs `jwt_auth`
+secrets at module import so it passes regardless of pytest argument/collection order
+(previously it only passed when collected before other suites).
+
+Frontend: `cd frontend && npm run build` → passes (`tsc && vite build`).
 
 ### E2E control-center suites
 

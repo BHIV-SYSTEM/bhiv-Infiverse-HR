@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, ReactNode } from 'react'
+import { createContext, useContext, useEffect, useMemo, useState, ReactNode } from 'react'
 import { authStorage, clearAuthStorage } from '../utils/authStorage'
 
 interface User {
@@ -388,17 +388,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const userRole = user?.role || authStorage.getItem('user_role');
   const userName = user?.name || authStorage.getItem('user_name');
 
-  return (
-    <AuthContext.Provider value={{
+  // Memoize so consumers keyed on context (Profile loadKyc/loadProfile effects)
+  // do not re-run on every AuthProvider render — that was the fetch loop.
+  const value = useMemo(
+    () => ({
       user,
       loading,
       signIn: handleSignIn,
       signUp: handleSignUp,
-        signOut: handleSignOut,
-        isGuest: user?.isGuest === true,
-        userRole,
+      signOut: handleSignOut,
+      isGuest: user?.isGuest === true,
+      userRole,
       userName,
-    }}>
+    }),
+    [user, loading, userRole, userName],
+  );
+
+  return (
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );

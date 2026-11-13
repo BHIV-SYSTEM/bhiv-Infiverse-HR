@@ -8,10 +8,14 @@ import {
   createAdminTenant,
   updateAdminTenant,
   linkTenantClient,
+  createAdminTenantInvite,
+  fetchAdminTenantInvites,
+  revokeAdminTenantInvite,
   type AdminTenantsResponse,
   type AdminClientAccount,
   type TenantClientAccount,
   type TenantNode,
+  type TenantInvite,
 } from '../../services/api'
 
 /**
@@ -54,6 +58,11 @@ export default function AdminTenantsPage() {
   // All Client-Portal accounts — discovery panel so the owner never opens MongoDB
   const [clients, setClients] = useState<AdminClientAccount[]>([])
 
+  // Tenanted invite links (share access; single-use, 7-day expiry)
+  const [inviteFor, setInviteFor] = useState<string | null>(null)
+  const [inviteList, setInviteList] = useState<Record<string, TenantInvite[]>>({})
+  const [creatingInvite, setCreatingInvite] = useState(false)
+
   const load = useCallback(async () => {
     try {
       const result = await fetchAdminTenants()
@@ -94,6 +103,58 @@ export default function AdminTenantsPage() {
 
   const errorMessage = (err: any, fallback: string) =>
     err?.response?.data?.detail || err?.response?.data?.error || err?.message || fallback
+
+  const refreshInvites = useCallback(async (tenantId: string) => {
+    try {
+      const result = await fetchAdminTenantInvites(tenantId)
+      setInviteList((prev) => ({ ...prev, [tenantId]: result.invites || [] }))
+    } catch (err: any) {
+      toast.error(errorMessage(err, 'Failed to load invite links'))
+    }
+  }, [])
+
+  const handleOpenInvites = useCallback(
+    async (tenantId: string) => {
+      if (inviteFor === tenantId) {
+        setInviteFor(null)
+        return
+      }
+      setInviteFor(tenantId)
+      setAddUnder(null)
+      setLinkFor(null)
+      await refreshInvites(tenantId)
+    },
+    [inviteFor, refreshInvites]
+  )
+
+  const handleCreateInvite = async (tenantId: string) => {
+    setCreatingInvite(true)
+    try {
+      const result = await createAdminTenantInvite(tenantId)
+      const url = `${window.location.origin}${result.invite.invite_path}`
+      try {
+        await navigator.clipboard.writeText(url)
+        toast.success('Invite link created and copied')
+      } catch {
+        toast.success('Invite link created')
+      }
+      await refreshInvites(tenantId)
+    } catch (err: any) {
+      toast.error(errorMessage(err, 'Failed to create invite link'))
+    } finally {
+      setCreatingInvite(false)
+    }
+  }
+
+  const handleRevokeInvite = async (tenantId: string, token: string) => {
+    try {
+      await revokeAdminTenantInvite(tenantId, token)
+      toast.success('Invite link revoked')
+      await refreshInvites(tenantId)
+    } catch (err: any) {
+      toast.error(errorMessage(err, 'Failed to revoke invite link'))
+    }
+  }
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -334,8 +395,108 @@ export default function AdminTenantsPage() {
           >
             + Add client
           </button>
+          <button
+            onClick={() => handleOpenInvites(node.tenant_id)}
+            className={`text-xs px-3 py-1.5 rounded-lg border transition-colors ${
+              inviteFor === node.tenant_id
+                ? 'bg-emerald-600/25 border-emerald-500/60 text-emerald-200'
+                : 'bg-slate-900 hover:bg-slate-700 text-emerald-300 border-emerald-600/40'
+            }`}
+          >
+            Share link
+          </button>
         </div>
       </div>
+
+      {inviteFor === node.tenant_id && (
+        <div className="mt-4 bg-slate-900/60 border border-emerald-500/30 rounded-xl p-4">
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <div>
+              <p className="text-xs font-semibold text-emerald-300">
+                Share invite link — single use, valid 7 days
+              </p>
+              <p className="text-[11px] text-gray-500">
+                The recipient creates their own company account through this link; no credentials
+                are handled here.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setInviteFor(null)}
+              className="text-gray-400 hover:text-white text-sm"
+              aria-label="Close invite links"
+            >
+              ✕
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => handleCreateInvite(node.tenant_id)}
+            disabled={creatingInvite}
+            className="mb-3 px-3 py-1.5 rounded-lg bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-xs font-medium hover:opacity-90 transition-opacity disabled:opacity-60"
+          >
+            {creatingInvite ? 'Creating…' : '+ New invite link'}
+          </button>
+
+          {(inviteList[node.tenant_id] || []).length === 0 ? (
+            <p className="text-xs text-gray-500">No invite links yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {(inviteList[node.tenant_id] || []).map((invite) => {
+                const badge =
+                  invite.status === 'active'
+                    ? 'bg-emerald-500/15 text-emerald-400'
+                    : invite.status === 'expired'
+                      ? 'bg-amber-500/15 text-amber-400'
+                      : invite.status === 'revoked'
+                        ? 'bg-red-500/15 text-red-400'
+                        : 'bg-slate-600/30 text-gray-400'
+                const url = `${window.location.origin}${invite.invite_path}`
+                return (
+                  <div
+                    key={invite.token}
+                    className="flex items-center justify-between gap-2 bg-slate-800/60 border border-slate-700/70 rounded-lg px-3 py-2"
+                  >
+                    <div className="min-w-0">
+                      <button
+                        type="button"
+                        onClick={() => copyToClipboard(url)}
+                        title="Copy invite link"
+                        className="block max-w-full truncate font-mono text-[11px] text-emerald-300 hover:text-emerald-200 hover:underline"
+                      >
+                        {url}
+                      </button>
+                      <p className="text-[10px] text-gray-500 mt-0.5">
+                        {invite.expires_at
+                          ? `expires ${new Date(invite.expires_at).toLocaleString()}`
+                          : 'no expiry'}
+                        {invite.used_at ? ' · redeemed' : ''}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span
+                        className={`text-[10px] px-2 py-0.5 rounded-full uppercase tracking-wide ${badge}`}
+                      >
+                        {invite.status}
+                      </span>
+                      {invite.status === 'active' && (
+                        <button
+                          type="button"
+                          onClick={() => handleRevokeInvite(node.tenant_id, invite.token)}
+                          className="text-[11px] px-2 py-1 rounded-md bg-red-500/10 hover:bg-red-500/30 text-red-300 border border-red-500/40 transition-colors"
+                        >
+                          Revoke
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {linkFor === node.tenant_id && (() => {
         const q = linkClientId.trim().toLowerCase()
@@ -498,12 +659,6 @@ export default function AdminTenantsPage() {
               className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm text-gray-300"
             >
               Refresh
-            </button>
-            <button
-              onClick={() => navigate('/admin/ndas')}
-              className="px-3 py-2 rounded-lg bg-emerald-600/15 hover:bg-emerald-600/30 border border-emerald-600/50 text-sm text-emerald-300"
-            >
-              NDA Approvals
             </button>
             <button
               onClick={() => navigate('/control')}

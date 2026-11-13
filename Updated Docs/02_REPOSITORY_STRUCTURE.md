@@ -115,14 +115,17 @@ gateway/
 │   ├── lineage_envelope.py
 │   ├── workforce_common.py
 │   ├── workforce_lifecycle.py
-│   └── workforce_runtime.py      # orgs/divisions/units/departments/employees models
+│   ├── workforce_runtime.py      # orgs/divisions/units/departments/employees models
+│   ├── nda.py                    # 1111 lines — NDA gate (template, verify, tenant review)
+│   └── verification.py           # 325 lines — KYC identity verification (text + name match)
 ├── routes/
 │   ├── ai_integration.py         # /api/v1 AI router
 │   ├── rl_routes.py              # /api/v1 RL router
+│   ├── tenancy_routes.py         # 1098 lines — admin login, tenant hierarchy, invites
 │   └── workforce_governance_routes.py  # 45 workforce routes
 ├── config.py                     # Requires DATABASE_URL, API_KEY_SECRET, JWT secrets, service URLs
 ├── dependencies.py               # Re-exports auth deps
-├── jwt_auth.py                   # 297 lines — triple-auth model
+├── jwt_auth.py                   # 393 lines — triple-auth model + get_service_auth
 ├── langgraph_integration.py      # LangGraph router
 ├── monitoring.py                 # Prometheus metrics
 ├── workflow_proxy.py             # 676 lines — Complete-Infiverse bridge
@@ -154,7 +157,7 @@ frontend/
     ├── pages/                    # auth/, candidate/, recruiter/, client/, control/, hr/
     ├── components/               # layouts/, sidebars/, navbars/, cards/, recruiter/, config/
     ├── context/                  # AuthContext, ThemeContext, SidebarContext, RecruiterConnectionContext, CandidateTasksContext
-    ├── services/                 # api.ts (axios client, 2293 lines), authService.ts
+    ├── services/                 # api.ts (axios client, 2717 lines), authService.ts
     ├── config/                   # notifications.config.ts
     └── utils/
 ```
