@@ -183,8 +183,8 @@ Suspending a tenant is management metadata only. To actually block a tenant's lo
 |-------|---------|--------|
 | Hierarchy suite incl. 5 invite tests | `pytest backend/tests/gateway/test_tenant_hierarchy_admin.py` | **36 passed** (within the combined run below) |
 | NDA suites (gate + tenancy isolation) | `pytest backend/tests/nda` | **53 passed** |
-| KYC + contact-verification suite | `pytest backend/tests/verification` | **39 passed** |
-| Combined regression run | `pytest backend/tests/{identity,nda,gateway,scripts,cv,pravesh,verification}` | **270 passed, 2 skipped, 0 failed** |
+| NDA + contact-verification suite | `pytest backend/tests/nda backend/tests/verification` | **94 passed** (55+39) |
+| Combined regression run | `pytest backend/tests/{identity,nda,gateway,scripts,cv,pravesh,verification}` | **272 passed, 2 skipped, 0 failed** |
 | Frontend typecheck + build | `cd frontend && npm run build` | **passes** (`tsc && vite build`) |
 
 The hierarchy suite now re-syncs `jwt_auth` secrets at module import, so it passes in

@@ -8,8 +8,8 @@ Coverage:
 1. Company (client JWT) NDA queue/review/download is scoped to its OWN tenant
    subset — foreign candidates are unreachable (403), queues filtered.
 2. Platform admin + service api_key + candidates have NO tenant endpoints.
-3. Upload auto-verdict: unowned candidate NEEDS_REVIEW -> honest auto-REJECTED
-   with machine-readable reasons; owned candidate keeps NEEDS_REVIEW.
+3. Upload auto-verdict: unowned NEEDS_REVIEW is KEPT (never auto-rejected);
+   owned candidates also keep NEEDS_REVIEW for the company queue.
 4. Admin (platform JWT) has no cross-candidate document read (403).
 5. Template carries the official NEW_BHIV_NDA content markers.
 """
@@ -418,20 +418,22 @@ def test_tenant_review_validates_decision(client, fake_db):
 
 
 # ---------------------------------------------------------------------------
-# 3. Upload auto-verdict: unowned auto-REJECTED, owned keeps NEEDS_REVIEW
+# 3. Upload auto-verdict: unowned NEEDS_REVIEW is KEPT (no auto-reject);
+#    owned candidates also keep NEEDS_REVIEW for the company queue.
 # ---------------------------------------------------------------------------
 
 
-def test_unowned_scan_upload_auto_rejected(client, fake_db):
+def test_unowned_scan_upload_stays_needs_review(client, fake_db):
+    # Correct-but-scanned NDAs must NOT be auto-REJECTED (false refuse).
     resp = _upload(client, CAND_UNOWNED, make_scan_pdf())
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["status"] == NDA_STATUS_REJECTED
+    assert body["status"] == NDA_STATUS_NEEDS_REVIEW
     assert body["gate_passed"] is False
     reasons = body["verification"]["reasons"]
-    assert "auto_decision_unowned_needs_review" in reasons
+    assert "unowned_candidate_needs_review" in reasons
     assert "no_extractable_text_scanned_or_image_pdf" in reasons
-    assert body["verification"]["auto_decision"] == "REJECTED"
+    assert body["verification"]["auto_decision"] == "NEEDS_REVIEW"
 
 
 def test_owned_scan_upload_stays_needs_review_for_company(client, fake_db):
@@ -439,7 +441,7 @@ def test_owned_scan_upload_stays_needs_review_for_company(client, fake_db):
     resp = _upload(client, CAND_A, make_scan_pdf())
     assert resp.status_code == 200, resp.text
     assert resp.json()["status"] == NDA_STATUS_NEEDS_REVIEW
-    assert "hiring company will review" in resp.json()["message"]
+    assert "re-upload a clearer text-based" in resp.json()["message"] or "reviewer will check" in resp.json()["message"]
 
 
 def test_unowned_signed_text_upload_still_verifies(client, fake_db):

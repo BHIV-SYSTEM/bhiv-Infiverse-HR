@@ -26,7 +26,7 @@
 | `integration/` | 4 | Cross-service flows |
 | `langgraph/` | 15 | LangGraph workflows, RL, notifications |
 | `misc/` | 34 | Assorted endpoint tests |
-| `nda/` | 2 | NDA gate verification + tenancy isolation (tenant queue/review, auto-decision, service-key access) |
+| `nda/` | 2 | NDA gate verification + tenancy isolation (tenant queue/review, auto-decision, service-key access); unowned NEEDS_REVIEW never auto-rejected |
 | `pravesh/` | 1 | Pravesh SSO bridge |
 | `rl_integration/` | 6 | RL engine |
 | `scripts/` | 1 | Candidate-linking script |
@@ -73,9 +73,10 @@ cd backend
   backend/tests/verification -q
 ```
 
-**Result: 270 passed, 2 skipped, 0 failed.** Highlights: `nda/` **53** (incl. 16 tenancy
-isolation tests), `verification/` **39** (KYC 21 + contact OTP 18: eligibility,
-rate-limit, expiry, honest statuses), `gateway/test_tenant_hierarchy_admin.py`
+**Result: 272 passed, 2 skipped, 0 failed.** Highlights: `nda/` **55** (incl. 16 tenancy
+isolation tests + middle-name/email-alias identity matches), `verification/` **39**
+(KYC 21 + contact OTP 18: eligibility, rate-limit, expiry, honest statuses),
+`gateway/test_tenant_hierarchy_admin.py`
 **36** (incl. 5 invite-share-link tests). The hierarchy suite now re-syncs `jwt_auth`
 secrets at module import so it passes regardless of pytest argument/collection order
 (previously it only passed when collected before other suites).

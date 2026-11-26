@@ -22,13 +22,13 @@ const STATUS_COPY: Record<
     action: 'Upload signed NDA',
   },
   NEEDS_REVIEW: {
-    title: 'Your NDA is being reviewed',
-    body: 'We received your NDA, but automatic verification could not confirm the signature and stamp (for example, scanned documents). An administrator will review it shortly. You can also upload a clearer copy to speed things up.',
+    title: 'Your NDA needs a quick check',
+    body: 'We received your NDA, but automatic verification could not confirm the signature and identity from this file (common with scanned or photo copies). A reviewer will check it — or you can re-upload a clearer text-based PDF (open the official template, fill the signature block, Print → Save as PDF) to unlock faster.',
     action: 'Upload a clearer copy',
   },
   REJECTED: {
     title: 'Your NDA needs to be re-uploaded',
-    body: 'The uploaded document was not a valid signed NDA (unreadable, encrypted, or incomplete). Please open the official template, sign and stamp it, and upload the PDF again.',
+    body: 'The uploaded file could not be used as an NDA (empty, not a PDF, encrypted, or unreadable). Please open the official template, fill and sign it, save as PDF, and upload again. Scanned copies that are readable are sent for review instead of being rejected.',
     action: 'Re-upload signed NDA',
   },
   VERIFIED: {

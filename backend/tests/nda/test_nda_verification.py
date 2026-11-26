@@ -302,6 +302,34 @@ def test_verify_marker_but_wrong_identity_needs_review():
     assert "name_match:False" in res["reasons"]
 
 
+def test_verify_middle_name_dropped_still_matches():
+    """Profile has a middle name; NDA signature block only has first+last."""
+    res = verify_nda_pdf(
+        make_text_pdf(
+            "Signed by Ashmit Pandey, receiving party. "
+            "Contact: personal@example.com Signature stamped."
+        ),
+        candidate_name="Ashmit Kumar Pandey",
+        candidate_email="asha@example.com",  # login alias — must not block
+    )
+    # Either name (first+last) or email local-part may identify the signer.
+    assert res["result"] == NDA_STATUS_VERIFIED
+    assert "name_match:True" in res["reasons"]
+
+
+def test_verify_email_localpart_matches_when_domain_differs():
+    res = verify_nda_pdf(
+        make_text_pdf(
+            "Signed by Ashmit Pandey. Email on form: ashmit.kumar@gmail.com "
+            "Signature and stamp affixed."
+        ),
+        candidate_name="Ashmit Pandey",
+        candidate_email="ashmit.kumar@corp-login.example",  # SSO alias
+    )
+    assert res["result"] == NDA_STATUS_VERIFIED
+    assert "email_match:True" in res["reasons"]
+
+
 # ---------------------------------------------------------------------------
 # 2. NDA API: template, status, upload, download
 # ---------------------------------------------------------------------------

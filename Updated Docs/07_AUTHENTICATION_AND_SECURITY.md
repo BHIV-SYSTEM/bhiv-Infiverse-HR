@@ -182,10 +182,19 @@ stamp → upload → auto-verify → **hiring-company review**):
 - Verdicts: `VERIFIED` (parses + signature/stamp marker + identity match),
   `NEEDS_REVIEW` (scans or unconfirmed text), `REJECTED` (not a usable PDF).
   Reasons are machine-readable in `verification.reasons`.
-- **Auto-decision on upload**: a candidate with **no owning company** (no
-  applications → jobs link) is auto-`REJECTED` with
-  `auto_decision_unowned_needs_review` reasons; owned candidates keep
-  `NEEDS_REVIEW` until their company reviews.
+- **No auto-reject for unowned candidates**: `NEEDS_REVIEW` is **kept** for
+  both owned and unowned candidates (reason `unowned_candidate_needs_review`
+  when unowned). Correct-but-unverifiable files (scans, image signatures,
+  name/email variants) are never auto-`REJECTED` — ops reviews the service
+  queue (`GET /v1/nda/admin/queue`, api_key) or the candidate re-uploads a
+  clearer text-based PDF. `REJECTED` is only for unusable files (empty,
+  non-PDF, encrypted, unparsable).
+- **Company routing**: the NDA is **platform-level** (BlackHole Infiverse
+  LLP), not per-company. A candidate's submission appears in the review
+  queue of **every company whose job they applied to** (tenant subset via
+  `job_applications` → `jobs.client_id`). There is no cross-tenant leak —
+  XYZ only sees it if the candidate also applied to an XYZ job — but one
+  NDA can be visible to multiple companies (first reviewer wins).
 - **Enforcement** (`enforce_nda_gate`, 403 `NDA_NOT_VERIFIED`):
   `POST /v1/candidate/apply`, `PUT /v1/candidate/profile/{id}`,
   `POST /v1/candidate/applications/{id}/documents/{type}` (except the `nda`
@@ -270,9 +279,10 @@ tests/history (soft-retire) but the Profile card no longer calls them:
   single-use/expiry behaviour, and KYC honest-verdict rules each have
   dedicated tests (`nda/test_nda_tenancy.py`, `gateway/test_tenant_hierarchy_admin.py`,
   `verification/test_kyc_verification.py`).
-- **2026-11-12** (contact verification): combined run extended →
-  **270 passed, 2 skipped, 0 failed** (`verification/` 39 = KYC 21 +
-  contact OTP 18: eligibility, rate-limit, expiry, honest statuses).
+- **2026-11-12** (contact verification + NDA false-reject fix): combined run
+  → **272 passed, 2 skipped, 0 failed** (`nda/` 55 incl. middle-name/email
+  identity matches + no-auto-reject for unowned NEEDS_REVIEW;
+  `verification/` 39 = KYC 21 + contact OTP 18).
   Frontend `npm run build` green.
 
 ---

@@ -13,7 +13,7 @@ Flow:
      company JWT, own tenant subset only). Platform admins have NO access
      (tenancy audit) — ops uses the service api_key
      (``/v1/nda/admin/*``). Unowned candidates are decided automatically
-     (NEEDS_REVIEW → REJECTED with machine-readable reasons).
+     (NEEDS_REVIEW kept for ops review / clearer re-upload — never auto-REJECTED).
   5. While status != ``VERIFIED``, candidate write/endpoints that carry the
      NDA obligation are blocked by ``enforce_nda_gate`` (403
      ``NDA_NOT_VERIFIED``): job application, profile update, non-NDA
@@ -60,15 +60,22 @@ NDA_MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 NDA_ALLOWED_CONTENT_TYPES = {"application/pdf"}
 
 # Text markers that indicate a signed/stamped document.
+# (Kept deliberately broad: the official BHIV NDA prints "Signed By (Receiving
+# Party)" / "Signature:" / "Stamp" lines, and a signed copy must carry at
+# least one of these evidence tokens in its extractable text.)
 _SIGNATURE_MARKERS = (
     "signed",
+    "signed by",
     "signature",
     "signatory",
     "stamp",
     "stamped",
     "seal",
+    "executed",
+    "witness",
     "authorised signatory",
     "authorized signatory",
+    "receiving party",
 )
 
 
@@ -185,23 +192,60 @@ def verify_nda_pdf(
         reasons.append("no_extractable_text_scanned_or_image_pdf")
         return verdict(NDA_STATUS_NEEDS_REVIEW)
 
-    lowered = text.lower()
-    marker = next((m for m in _SIGNATURE_MARKERS if m in lowered), None)
+    # Normalise whitespace so multi-line / multi-space extractions still
+    # match (PyPDF2 frequently inserts stray spaces/newlines).
+    normalised_text = " ".join(text.split()).lower()
+    marker = next((m for m in _SIGNATURE_MARKERS if m in normalised_text), None)
     if marker is None:
         reasons.append("no_signature_or_stamp_marker_in_text")
         return verdict(NDA_STATUS_NEEDS_REVIEW)
     reasons.append(f"marker:{marker}")
 
     # Identity sub-check (only when we know who the candidate is).
+    # A candidate is considered identified when EITHER their name OR their
+    # email is evidenced in the document text — requiring both caused
+    # correctly signed NDAs (e.g. those carrying only the printed name, or
+    # a different-but-valid contact address) to be refused. The name check
+    # is token-based so ordering/spacing differences do not cause a miss.
+    # Name matching is deliberately tolerant of middle names / initials:
+    # requiring EVERY profile-name token to appear refused correct NDAs
+    # where the signature block drops a middle name ("Ashmit Pandey" vs
+    # profile "Ashmit Kumar Pandey"). First + last token is enough.
     name_ok = True
     email_ok = True
     if candidate_name:
-        name_ok = candidate_name.strip().lower() in lowered
+        name_norm = " ".join(str(candidate_name).split()).lower()
+        if name_norm and name_norm in normalised_text:
+            name_ok = True
+        else:
+            tokens = [t for t in name_norm.split() if t]
+            if not tokens:
+                name_ok = False
+            elif len(tokens) == 1:
+                name_ok = tokens[0] in normalised_text
+            else:
+                # First + last only (middle names optional); also accept a
+                # strict all-token match when the full name is on the page.
+                name_ok = (
+                    tokens[0] in normalised_text
+                    and tokens[-1] in normalised_text
+                ) or all(tok in normalised_text for tok in tokens)
         reasons.append(f"name_match:{name_ok}")
     if candidate_email:
-        email_ok = candidate_email.strip().lower() in lowered
+        email_norm = str(candidate_email).strip().lower()
+        email_ok = email_norm in normalised_text
+        if not email_ok and "@" in email_norm:
+            # Profile email may be a login alias; the local-part alone on
+            # the NDA (or vice versa) still evidences the same mailbox
+            # when it is long enough to be distinctive.
+            local = email_norm.split("@", 1)[0]
+            if len(local) >= 4 and local in normalised_text:
+                email_ok = True
         reasons.append(f"email_match:{email_ok}")
-    if not (name_ok and email_ok):
+    # If we know at least one identity field, require at least one match;
+    # if we know neither, the marker alone is sufficient (existing behaviour).
+    known_identity = bool(candidate_name or candidate_email)
+    if known_identity and not (name_ok or email_ok):
         # Markers present but identity not confirmed in text — human check.
         return verdict(NDA_STATUS_NEEDS_REVIEW)
 
@@ -578,6 +622,10 @@ any reason.</div>
   </div>
   <div>
     <div class="line"></div>
+    Company (Hiring Entity)
+  </div>
+  <div>
+    <div class="line"></div>
     Email
   </div>
   <div>
@@ -660,14 +708,36 @@ async def _tenant_candidate_ids(db, client_id: str) -> set:
     job_ids = await _client_all_job_ids_for_dashboard(db, client_id)
     if not job_ids:
         return set()
+    # job_id in job_applications may be stored as string, int or ObjectId —
+    # match all plausible variants so a company's queue is not silently empty.
+    job_variants: List[Any] = []
+    seen_jv = set()
+    for j in job_ids:
+        js = str(j).strip()
+        if not js:
+            continue
+        if js not in seen_jv:
+            seen_jv.add(js)
+            job_variants.append(js)
+        if js.isdigit():
+            ij = int(js)
+            if ij not in seen_jv:
+                seen_jv.add(ij)
+                job_variants.append(ij)
+        try:
+            from bson import ObjectId
+
+            if ObjectId.is_valid(js):
+                oj = ObjectId(js)
+                if oj not in seen_jv:
+                    seen_jv.add(oj)
+                    job_variants.append(oj)
+        except Exception:
+            pass
     raw = await db.job_applications.distinct(
-        "candidate_id", {"job_id": {"$in": [str(j) for j in job_ids]}}
+        "candidate_id", {"job_id": {"$in": job_variants}}
     )
     ids = {str(c).strip() for c in raw if str(c or "").strip()}
-    if not ids and client_id.isdigit():
-        raw = await db.job_applications.distinct(
-            "candidate_id", {"candidate_id": int(client_id)}
-        )
     return set(sorted(ids)[:10000])
 
 
@@ -682,11 +752,22 @@ async def _candidate_owner_client_ids(db, candidate_id: str) -> List[str]:
     cid = str(candidate_id or "").strip()
     if not cid:
         return []
-    job_raw = await db.job_applications.distinct("job_id", {"candidate_id": cid})
-    if not job_raw and cid.isdigit():
-        job_raw = await db.job_applications.distinct(
-            "job_id", {"candidate_id": int(cid)}
-        )
+    # Candidate ids may be stored as strings, ints or ObjectIds depending on
+    # the intake path — query all plausible variants so ownership is not
+    # missed (a missed lookup wrongly auto-rejects an owned candidate's NDA).
+    id_variants: List[Any] = [cid]
+    if cid.isdigit():
+        id_variants.append(int(cid))
+    try:
+        from bson import ObjectId
+
+        if ObjectId.is_valid(cid):
+            id_variants.append(ObjectId(cid))
+    except Exception:
+        pass
+    job_raw = await db.job_applications.distinct(
+        "job_id", {"candidate_id": {"$in": id_variants}}
+    )
     if not job_raw:
         return []
     str_ids = {str(j) for j in job_raw}
@@ -783,32 +864,27 @@ async def upload_nda(
     now = datetime.now(timezone.utc)
     previous = await get_nda_record(db, candidate_id)
 
-    # System-driven decision (tenancy audit): a candidate OUTSIDE every
-    # company subset has no company to review their NDA — waiting on a
-    # human admin would either stall them forever or hand the platform
-    # admin access to data it must not have. So NEEDS_REVIEW for an
-    # UNOWNED candidate converts honestly to REJECTED with machine-readable
-    # reasons (scanned/image-only, missing marker, identity mismatch …).
-    # Candidates INSIDE a company subset keep NEEDS_REVIEW — the owning
-    # company reviews its own data on its own dashboard.
+    # Unowned candidates: NEEDS_REVIEW is KEPT (never auto-REJECTED).
+    # Auto-rejecting correct-but-unverifiable NDAs (scanned / image-only
+    # signature pages, identity variants) refused valid documents. Ops
+    # reviews the service queue (`GET /v1/nda/admin/queue`, api_key only);
+    # candidates can also re-upload a clearer text-based PDF which overwrites
+    # the record. The platform admin still has no NDA access (tenancy audit).
+    # Owned candidates keep NEEDS_REVIEW — the owning company reviews on
+    # its own dashboard (`/client/ndas`).
     if verification.get("result") == NDA_STATUS_NEEDS_REVIEW:
         try:
             owners = await _candidate_owner_client_ids(db, candidate_id)
         except Exception:
-            owners = None  # storage hiccup: keep NEEDS_REVIEW, never fabricate
+            owners = None  # storage hiccup: keep NEEDS_REVIEW either way
         if owners == []:
             verification = dict(verification)
             reasons = [str(r) for r in (verification.get("reasons") or [])]
-            reasons.append("auto_decision_unowned_needs_review")
-            reasons.append(
-                "independent_candidate_requires_text_verifiable_signature;"
-                "scanned_or_image_only_uploads_are_rejected_automatically"
-            )
-            verification["result"] = NDA_STATUS_REJECTED
+            reasons.append("unowned_candidate_needs_review")
             verification["reasons"] = reasons
-            verification["auto_decision"] = "REJECTED"
+            verification["auto_decision"] = "NEEDS_REVIEW"
             verification["auto_decision_reason"] = (
-                "unowned_candidate_non_text_verifiable_nda"
+                "unowned_candidate_pending_ops_review_or_clearer_reupload"
             )
 
     doc = {
@@ -840,7 +916,10 @@ async def upload_nda(
             "NDA verified — the platform is unlocked."
             if out["gate_passed"]
             else (
-                "Uploaded — your hiring company will review it."
+                "Uploaded — automatic verification could not confirm the "
+                "signature/identity from this file. A reviewer will check "
+                "it, or re-upload a clearer text-based (non-scan) PDF to "
+                "speed things up."
                 if out["status"] == NDA_STATUS_NEEDS_REVIEW
                 else "Upload rejected — please re-upload a valid, signed NDA."
             )
