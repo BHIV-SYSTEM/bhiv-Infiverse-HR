@@ -161,6 +161,21 @@ export default function RoleNavbar({ role }: RoleNavbarProps) {
     }
   }
 
+  const handleNotificationClick = (item: PortalNotification) => {
+    void handleMarkNotificationRead(item.id)
+    const payload = (item.payload || {}) as Record<string, unknown>
+    const applicationId = typeof payload.application_id === 'string' ? payload.application_id : ''
+    // Candidate "Documents requested by client" → straight into the upload flow.
+    if (role === 'candidate' && item.kind === 'document_request') {
+      setNotificationsOpen(false)
+      navigate(
+        applicationId
+          ? `/candidate/applied-jobs?application=${encodeURIComponent(applicationId)}`
+          : '/candidate/applied-jobs'
+      )
+    }
+  }
+
   return (
     <nav className="fixed top-0 left-0 right-0 h-16 backdrop-blur-xl bg-white/95 dark:bg-slate-900/95 border-b border-gray-200/50 dark:border-slate-700/50 z-50 shadow-sm transition-all duration-300">
       <div className="flex items-center justify-between h-full px-3 sm:px-4">
@@ -262,7 +277,7 @@ export default function RoleNavbar({ role }: RoleNavbarProps) {
                     notifications.map((item) => (
                       <button
                         key={item.id}
-                        onClick={() => void handleMarkNotificationRead(item.id)}
+                        onClick={() => handleNotificationClick(item)}
                         className={`w-full text-left px-4 py-3 border-b border-gray-100 dark:border-slate-800 hover:bg-gray-50 dark:hover:bg-slate-800/60 transition-colors ${
                           item.is_read ? '' : 'bg-blue-50/60 dark:bg-blue-900/10'
                         }`}

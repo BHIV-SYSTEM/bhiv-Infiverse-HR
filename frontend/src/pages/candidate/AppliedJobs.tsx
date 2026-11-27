@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import { getCandidateApplications, uploadCandidateApplicationDocument, type Application, type ApplicationDocumentType } from '../../services/api'
 import { useAuth } from '../../context/AuthContext'
@@ -16,6 +17,10 @@ export default function AppliedJobs() {
   const [uploadDocType, setUploadDocType] = useState<ApplicationDocumentType | null>(null)
   const [pendingUploadFile, setPendingUploadFile] = useState<File | null>(null)
   const [uploadingDocKey, setUploadingDocKey] = useState<string | null>(null)
+  const [searchParams, setSearchParams] = useSearchParams()
+  // Deep link from a "Documents requested by client" notification:
+  // /candidate/applied-jobs?application=<id>
+  const deepLinkApplicationId = searchParams.get('application')
 
   const loadApplications = useCallback(async () => {
     // Check authentication first
@@ -93,6 +98,26 @@ export default function AppliedJobs() {
     window.addEventListener('portal-notifications-updated', onNotificationsUpdated)
     return () => window.removeEventListener('portal-notifications-updated', onNotificationsUpdated)
   }, [loadApplications])
+
+  // Deep link: notification "Documents requested by client" opens the
+  // application straight into its upload flow (?application=<id>).
+  useEffect(() => {
+    if (!deepLinkApplicationId || loading) return
+    const target = applications.find((app) => app.id === deepLinkApplicationId)
+    if (target) {
+      setSelectedApp(target)
+      const hasPendingRequest = (target.required_documents || []).some(
+        (doc) => !isDocSubmissionLocked(target, doc)
+      )
+      if (hasPendingRequest) {
+        setUploadDocType(null)
+        setPendingUploadFile(null)
+        setUploadModalOpen(true)
+      }
+    }
+    // Consume the param so a refresh does not reopen the modal.
+    setSearchParams({}, { replace: true })
+  }, [deepLinkApplicationId, loading, applications, setSearchParams])
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -202,6 +227,14 @@ export default function AppliedJobs() {
 
   const openUploadModal = () => {
     if (!selectedApp) return
+    setUploadDocType(null)
+    setPendingUploadFile(null)
+    setUploadModalOpen(true)
+  }
+
+  // Open an application's upload flow directly from the list (pending request).
+  const openRequestUpload = (app: Application) => {
+    setSelectedApp(app)
     setUploadDocType(null)
     setPendingUploadFile(null)
     setUploadModalOpen(true)
@@ -347,6 +380,7 @@ export default function AppliedJobs() {
         <div className="space-y-4">
           {filteredApplications.map(app => {
             const statusConfig = getStatusConfig(app.status)
+            const pendingDocs = (app.required_documents || []).filter((doc) => !isDocSubmissionLocked(app, doc))
             return (
               <div
                 key={app.id}
@@ -374,16 +408,37 @@ export default function AppliedJobs() {
                     </div>
                   </div>
                   
-                  <div className="flex items-center gap-3">
+                  <div className="flex flex-wrap items-center gap-3">
                     <span className={`px-3 py-1 rounded-full text-sm font-medium ${statusConfig.color}`}>
                       {statusConfig.label}
                     </span>
+                    {pendingDocs.length > 0 && (
+                      <span
+                        className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-sm font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+                        title={pendingDocs.map((doc) => documentLabel(doc)).join(', ')}
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                        </svg>
+                        {pendingDocs.length === 1
+                          ? `${documentLabel(pendingDocs[0])} requested`
+                          : `${pendingDocs.length} documents requested`}
+                      </span>
+                    )}
                     <button
                       onClick={() => setSelectedApp(app)}
                       className="px-4 py-2 bg-gray-100 dark:bg-slate-700 hover:bg-gray-200 dark:hover:bg-slate-600 text-gray-700 dark:text-gray-300 rounded-lg text-sm font-medium transition-colors"
                     >
                       View Details
                     </button>
+                    {pendingDocs.length > 0 && (
+                      <button
+                        onClick={() => openRequestUpload(app)}
+                        className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
+                      >
+                        Upload {pendingDocs.length === 1 ? documentLabel(pendingDocs[0]) : 'Documents'}
+                      </button>
+                    )}
                   </div>
                 </div>
 

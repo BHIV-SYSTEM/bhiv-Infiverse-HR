@@ -340,6 +340,8 @@ def test_template_is_official_nda(client):
     assert resp.status_code == 200
     assert "NON-DISCLOSURE AGREEMENT" in resp.text
     assert "Signature" in resp.text and "Stamp" in resp.text
+    assert "COMPANY (HIRING ENTITY)" in resp.text
+    assert "companybox" in resp.text
 
 
 def test_status_defaults_to_not_submitted(client, fake_db):

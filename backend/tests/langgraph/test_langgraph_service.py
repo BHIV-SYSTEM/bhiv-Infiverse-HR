@@ -11,8 +11,11 @@ import asyncio
 import httpx
 from datetime import datetime
 
-# Set UTF-8 encoding for Windows
-if sys.platform == "win32":
+# Set UTF-8 encoding for Windows.
+# Only when run standalone: under pytest this detaches pytest's capture
+# buffers and crashes the whole session ("underlying buffer has been
+# detached" at teardown).
+if sys.platform == "win32" and "pytest" not in sys.modules:
     import codecs
     sys.stdout = codecs.getwriter("utf-8")(sys.stdout.detach())
     sys.stderr = codecs.getwriter("utf-8")(sys.stderr.detach())

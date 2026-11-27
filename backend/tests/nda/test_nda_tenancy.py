@@ -508,3 +508,9 @@ def test_template_carries_official_ndda_pdf_content(client, fake_db):
     assert "NON-DISCLOSURE AGREEMENT" in text
     assert "Form NDA/BHIV-v2" in text
     assert "Signature" in text and "Stamp" in text
+    # Company section must be prominent (dedicated box, not only the sig line)
+    assert "COMPANY (HIRING ENTITY)" in text
+    assert "Company (Hiring Entity)" in text  # signature-block label too
+    assert "companybox" in text
+    # Signature block points back to the box so both stay consistent
+    assert "Company (Hiring Entity) — same as the box at the top" in text

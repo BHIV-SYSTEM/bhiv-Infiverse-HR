@@ -18,12 +18,12 @@ const STATUS_COPY: Record<
 > = {
   NOT_SUBMITTED: {
     title: 'Sign your NDA to continue',
-    body: 'Before you can apply to jobs or use the platform, your Non-Disclosure Agreement must be uploaded and verified. Download the official template, print and sign it (stamp it if your institute requires), then upload the signed PDF below.',
+    body: 'Before you can apply to jobs or use the platform, your Non-Disclosure Agreement must be uploaded and verified. Download the official template, fill the Company (Hiring Entity) box and signature block, print and sign it (stamp it if your institute requires), then upload the signed PDF below.',
     action: 'Upload signed NDA',
   },
   NEEDS_REVIEW: {
     title: 'Your NDA needs a quick check',
-    body: 'We received your NDA, but automatic verification could not confirm the signature and identity from this file (common with scanned or photo copies). A reviewer will check it — or you can re-upload a clearer text-based PDF (open the official template, fill the signature block, Print → Save as PDF) to unlock faster.',
+    body: 'We received your NDA, but automatic verification could not confirm the signature and identity from this file (common with scanned or photo copies). A reviewer will check it — or you can re-upload a clearer text-based PDF (open the official template, fill the Company box and signature block, Print → Save as PDF) to unlock faster.',
     action: 'Upload a clearer copy',
   },
   REJECTED: {
@@ -252,6 +252,7 @@ export default function NdaGate({ children }: NdaGateProps) {
 
             <ol className="text-xs text-slate-400 space-y-1 list-decimal list-inside pt-2 border-t border-slate-700/70">
               <li>Open the official NDA template and print it to PDF.</li>
+              <li>Fill the <strong className="text-slate-300">Company (Hiring Entity)</strong> box and the signature block.</li>
               <li>Sign it (and stamp it if your institute requires).</li>
               <li>Upload the signed PDF — verification takes a few seconds.</li>
             </ol>

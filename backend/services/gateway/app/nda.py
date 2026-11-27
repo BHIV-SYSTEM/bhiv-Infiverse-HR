@@ -426,8 +426,9 @@ _NDA_TEMPLATE_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="printbar">
-  Fill the signature block at the end (Name, Role Applied For, Email,
-  College/Reference, Date &amp; Place), print or save this page as PDF
+  Fill the <strong>Company (Hiring Entity)</strong> box below and the signature
+  block at the end (Name, Role Applied For, Email, College/Reference,
+  Date &amp; Place), print or save this page as PDF
   (browser &#8594; Print &#8594; Save as PDF), sign and stamp it, then upload
   it from your Sampada profile.
   <button onclick="window.print()">Print / Save as PDF</button>
@@ -442,6 +443,26 @@ _NDA_TEMPLATE_HTML = """<!DOCTYPE html>
   hereinafter referred to as the &ldquo;Disclosing Party&rdquo;, and the undersigned party,
   hereinafter referred to as the &ldquo;Receiving Party&rdquo;.<br><br>
   Effective Date: Upon signing.
+</div>
+
+<!-- Company section: which hiring company this NDA is issued for. Printed
+     on the signed copy so the reviewing company can see it at a glance. -->
+<div class="companybox" style="border: 2px solid #111; padding: 14px 18px;
+     margin: 18px 0; background: #fafafa;">
+  <div style="font-size: 14px; font-weight: bold; margin-bottom: 10px;
+       letter-spacing: 0.5px;">
+    COMPANY (HIRING ENTITY)
+  </div>
+  <div style="font-size: 13.5px; margin-bottom: 14px; color: #333;">
+    Name of the company / hiring entity this NDA is issued for
+    (write the full legal name, e.g. <em>ABC Technologies Pvt. Ltd.</em>):
+  </div>
+  <div class="line" style="height: 36px; margin-bottom: 4px;"></div>
+  <div style="font-size: 12px; color: #555;">
+    If you are applying through the Sampada platform, enter the company name
+    shown on the job posting. Leave blank only if you are an independent
+    candidate with no hiring company yet.
+  </div>
 </div>
 
 <h2>1. PURPOSE</h2>
@@ -622,7 +643,7 @@ any reason.</div>
   </div>
   <div>
     <div class="line"></div>
-    Company (Hiring Entity)
+    Company (Hiring Entity) — same as the box at the top
   </div>
   <div>
     <div class="line"></div>
@@ -643,8 +664,9 @@ any reason.</div>
 </div>
 
 <footer>Form NDA/BHIV-v2 &mdash; faithful HTML rendering of NEW_BHIV_NDA.pdf
-(BlackHole Infiverse LLP) &middot; Fill the signature block (Name, Role Applied For,
-Email, College/Reference, Date &amp; Place), sign and stamp where applicable, then
+(BlackHole Infiverse LLP) &middot; Fill the <strong>Company (Hiring Entity)</strong>
+box at the top and the signature block (Name, Role Applied For, Email,
+College/Reference, Date &amp; Place), sign and stamp where applicable, then
 upload the signed copy from your Sampada profile.</footer>
 </body>
 </html>
