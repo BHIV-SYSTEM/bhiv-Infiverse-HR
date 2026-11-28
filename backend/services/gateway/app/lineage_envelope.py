@@ -55,11 +55,16 @@ class LineageEnvelope(BaseModel):
         schema_version: str = "1.0.0",
     ) -> "LineageEnvelope":
         cid = correlation_id or str(uuid.uuid4())
+        # Audit (P1): trace IDs are a cross-system UUIDv4 contract. A
+        # correlation ID may be an opaque caller value and must NEVER be
+        # copied into trace_id. Supplied trace IDs are validated; missing ones
+        # are always generated as UUIDv4.
+        tid = require_uuid_v4(trace_id, "trace_id") if trace_id else str(uuid.uuid4())
         return cls(
             origin_system=origin_system,
             owning_system=owning_system,
             schema_version=schema_version,
-            trace_id=trace_id or cid,
+            trace_id=tid,
             correlation_id=cid,
             trust_classification=trust_classification,
             visibility_scope=visibility_scope,

@@ -10,6 +10,7 @@ POST /api/v1/pravesh/exchange — SSO auto-login: valid Pravesh cookie in, local
                                  local account is created, merged or adopted.
 """
 
+import logging
 import os
 import sys
 import time
@@ -35,6 +36,7 @@ from pravesh_bridge import (  # noqa: E402
 )
 
 router = APIRouter(prefix="/pravesh", tags=["Pravesh SSO"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/status", summary="Pravesh bridge configuration (no secrets)")
@@ -140,36 +142,46 @@ async def exchange_session(request: Request):
     local_user_id = f"pravesh:{identity['user_id']}"
     email = identity.get("email") or ""
 
-    # Canonical candidate ID resolution
-    candidate_id = identity.get("candidate_id")
-    if not candidate_id and email:
+    # Canonical candidate ID resolution.
+    # Audit (P0): the upstream ``candidate_id`` claim is NOT authoritative.
+    # It is deliberately ignored here — an SSO token can only provide a
+    # namespaced identity. A canonical id comes from the local identity store
+    # (or the Abhiruchi registry fallback) and must be unambiguous and not
+    # quarantined.
+    candidate_id = None
+    if email:
         try:
             from app.identity import service as id_service
+            from app.identity.models import CANONICAL_ID_QUARANTINED
+
             store = await id_service.get_identity_store()
             matches = await store.find_by_email_institute(email, None)
-            # Quarantined identities (P1-6) never contribute a canonical id.
-            usable = [
-                m
+            usable = {
+                m.canonical_candidate_id
                 for m in matches
                 if m.canonical_candidate_id
-                and m.canonical_id_status != "QUARANTINED"
-            ]
-            if usable:
-                candidate_id = usable[0].canonical_candidate_id
-        except Exception:
-            pass
+                and str(m.canonical_id_status or "").upper() != CANONICAL_ID_QUARANTINED
+            }
+            # Ambiguous identity matches stay isolated — never pick the first.
+            if len(usable) == 1:
+                candidate_id = next(iter(usable))
+        except Exception as exc:
+            logger.warning("[PRAVESH] canonical lookup failed: %s", exc)
 
         # Fallback to live Abhiruchi students registry if not in store
         # (env-configurable, 5s timeout, 5-min cache — see _abhiruchi_candidate_id)
         if not candidate_id:
             candidate_id = await _abhiruchi_candidate_id(email)
 
-    resolved_candidate_id = candidate_id or local_user_id
+    # The namespaced SSO id is an identity, NEVER a local candidate id.
+    resolved_candidate_id = candidate_id
     now = int(time.time())
     payload = {
         "sub": local_user_id,
         "user_id": local_user_id,
-        "candidate_id": resolved_candidate_id,
+        # Unverified upstream claims are never minted into a local token.
+        "candidate_id": resolved_candidate_id or None,
+        "candidate_id_verified": bool(resolved_candidate_id),
         "email": email,
         "name": email.split("@")[0] if email else identity["user_id"],
         "role": role,
@@ -185,7 +197,7 @@ async def exchange_session(request: Request):
         "provider": "pravesh",
         "token": token,
         "user": {
-            "id": resolved_candidate_id,
+            "id": resolved_candidate_id or local_user_id,
             "candidate_id": resolved_candidate_id,
             "local_user_id": local_user_id,
             "email": email,

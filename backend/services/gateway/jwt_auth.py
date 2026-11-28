@@ -271,8 +271,9 @@ def get_service_or_admin_auth(
     if auth.get("type") == "api_key":
         return auth
     # Pravesh SSO identities are never service/platform-admin, even when the
-    # bridge maps their role to "admin" (audit: CRITICAL bypass).
-    if auth.get("type") == "pravesh_sso":
+    # bridge maps their role to "admin" (audit: CRITICAL bypass). This also
+    # covers locally exchanged tokens carrying ``auth_type``.
+    if _is_external_sso(auth):
         raise HTTPException(
             status_code=403,
             detail="Service or platform-admin access required",
@@ -301,13 +302,36 @@ def get_service_auth(api_key: str = Depends(get_api_key)):
     }
 
 
+def _is_external_sso(auth: dict) -> bool:
+    """True for identities asserted by an external SSO bridge (read-only).
+
+    Audit (P0): external SSO roles are informational. They must never satisfy
+    a local privileged-role check, even if the upstream token says ``admin``.
+    """
+    return (
+        str(auth.get("type") or "") == "pravesh_sso"
+        # Locally exchanged SSO tokens carry ``auth_type`` (not ``type``).
+        or str(auth.get("auth_type") or "") == "pravesh_sso"
+    )
+
+
 def require_role(*allowed_roles: str):
     """
     Dependency factory to require specific roles.
     Usage: Depends(require_role("admin", "recruiter"))
+
+    External SSO identities can only satisfy least-privileged candidate
+    checks; privileged roles must come from a locally minted JWT/API key.
     """
+    privileged = {"admin", "service", "client", "recruiter"}
+
     def role_checker(auth: dict = Security(get_auth)):
         user_role = auth.get("role", "")
+        if _is_external_sso(auth) and privileged.intersection(allowed_roles):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Access denied. Required roles: {', '.join(allowed_roles)}",
+            )
         if user_role not in allowed_roles and auth.get("type") != "api_key":
             raise HTTPException(
                 status_code=403,
@@ -352,6 +376,9 @@ def get_client_auth(
     auth = get_auth(credentials, request)
     if auth.get("type") == "api_key":
         return auth
+    # Audit (P0): external SSO never grants a privileged local role.
+    if _is_external_sso(auth):
+        raise HTTPException(status_code=403, detail="Client access required")
     if auth.get("role") not in ["client", "admin"]:
         raise HTTPException(status_code=403, detail="Client access required")
     return auth
@@ -365,6 +392,11 @@ def get_admin_auth(
     auth = get_auth(credentials, request)
     if auth.get("type") == "api_key":
         return auth
+    # Audit (P0): Pravesh/SSO sessions are read-only bridge identities. A
+    # remote ``roles:["admin"]`` claim must never unlock local admin routes
+    # (tenancy, quarantine review, candidate profile/CV data).
+    if _is_external_sso(auth):
+        raise HTTPException(status_code=403, detail="Admin access required")
     if auth.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return auth

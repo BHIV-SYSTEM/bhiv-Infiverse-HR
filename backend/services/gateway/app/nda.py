@@ -28,7 +28,10 @@ Honesty rules:
 * Every verdict carries machine-readable ``reasons``.
 
 Kill switch: ``NDA_GATE_ENABLED=false`` disables enforcement only
-(upload/status endpoints stay available).
+(upload/status endpoints stay available), but ONLY with the explicit
+non-production opt-in ``NDA_GATE_DEV_FAIL_OPEN=true``. In staging/production,
+or when that opt-in is absent, every path that cannot prove a VERIFIED NDA
+fails closed (HTTP 503 for unavailable verification, 403 for a blocked candidate).
 """
 
 from __future__ import annotations
@@ -96,6 +99,20 @@ def _hardened_env() -> bool:
     """True when ENV/ENVIRONMENT marks a shared or live deployment."""
     env = (os.getenv("ENV") or os.getenv("ENVIRONMENT") or "").strip().lower()
     return env in ("staging", "production", "prod")
+
+
+def _dev_fail_open_enabled() -> bool:
+    """Explicit, non-production opt-in for local development fail-open.
+
+    Audit: incidental conditions (missing DATABASE_URL, missing env marker,
+    an unrecognised ENV value) must NEVER silently bypass the NDA gate. Only
+    this named opt-in outside staging/production may do so.
+    """
+    if _hardened_env():
+        return False
+    return (os.getenv("NDA_GATE_DEV_FAIL_OPEN", "") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 
 class NdaVerificationUnavailable(RuntimeError):
@@ -311,15 +328,25 @@ async def get_nda_status(db, candidate_id: str) -> Dict[str, Any]:
 
 
 async def enforce_nda_gate(auth: Dict[str, Any]) -> None:
-    """Raise 403 unless the candidate's NDA is VERIFIED.
+    """Raise 403/503 unless the candidate's NDA is provably VERIFIED.
 
-    Bypasses (by design): non-candidate roles (recruiter, client, admin,
-    service API keys), demo guest sessions (``guest:*``), and the whole gate
-    when ``NDA_GATE_ENABLED=false``. Pravesh-SSO sessions with the candidate
-    role ARE gated. If Mongo is not configured at all there is no candidate
-    data to protect — enforcement is skipped (local dev / unit tests).
+    Deliberate bypasses: non-candidate roles (recruiter, client, admin,
+    service API keys) and demo guest sessions (``guest:*``). Pravesh-SSO
+    sessions with the candidate role ARE gated.
+
+    Audit hardening: an absent database, a DB error, a failed status lookup,
+    a disabled gate, or a missing candidate identity all fail closed (503
+    when verification cannot be determined, 403 when identity is missing),
+    unless ``NDA_GATE_DEV_FAIL_OPEN=true`` is explicitly set outside
+    staging/production. Incidental dev conditions never bypass the gate.
     """
     if not nda_gate_enabled():
+        if not _dev_fail_open_enabled():
+            logger.error("NDA gate is disabled without an explicit dev opt-in — failing closed.")
+            raise HTTPException(
+                status_code=503,
+                detail="NDA verification is unavailable — gate must be enabled",
+            )
         return
     role = str(auth.get("role") or "").strip().lower()
     auth_type = str(auth.get("type") or "").strip()
@@ -327,9 +354,15 @@ async def enforce_nda_gate(auth: Dict[str, Any]) -> None:
     if not is_candidate:
         return
 
-    user_id = str(auth.get("user_id") or auth.get("candidate_id") or "").strip()
+    user_id = str(auth.get("user_id") or auth.get("sub") or auth.get("candidate_id") or "").strip()
     if not user_id:
-        return
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "NDA_IDENTITY_REQUIRED",
+                "message": "Candidate identity is required to verify the NDA gate.",
+            },
+        )
     # Demo guest sessions (auth_type guest_demo / "guest:<name>" ids) are
     # a read-only preview: they never submit real data, so the gate lets
     # them through (the write endpoints they would need still 404 for them).
@@ -340,36 +373,35 @@ async def enforce_nda_gate(auth: Dict[str, Any]) -> None:
         from app.database import DatabaseNotConfiguredError, get_mongo_db
 
         db = await get_mongo_db()
-    except DatabaseNotConfiguredError:
-        # No database configured at all (local dev / unit tests): there is
-        # no candidate data to protect — enforcement is skipped.
-        return
-    except Exception as exc:
-        # Audit: an unexpected DB failure fails CLOSED in staging/production
-        # (never silently bypass the gate); dev keeps the old fail-open.
-        if _hardened_env():
-            logger.error(
-                "NDA gate: database unavailable (%s) — failing closed.", exc
-            )
+    except DatabaseNotConfiguredError as exc:
+        if not _dev_fail_open_enabled():
+            logger.error("NDA gate: database is not configured (%s) — failing closed.", exc)
             raise HTTPException(
                 status_code=503,
                 detail="NDA verification status unavailable — try again shortly",
             )
-        logger.warning("NDA gate: database unavailable (%s) — skipped (dev).", exc)
+        logger.warning("NDA gate: database not configured — dev fail-open opt-in active.")
+        return
+    except Exception as exc:
+        if not _dev_fail_open_enabled():
+            logger.error("NDA gate: database unavailable (%s) — failing closed.", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="NDA verification status unavailable — try again shortly",
+            )
+        logger.warning("NDA gate: database unavailable (%s) — skipped (dev opt-in).", exc)
         return
 
     try:
         status = await get_nda_status(db, user_id)
     except Exception as exc:
-        if _hardened_env():
-            logger.error(
-                "NDA gate: status lookup failed (%s) — failing closed.", exc
-            )
+        if not _dev_fail_open_enabled():
+            logger.error("NDA gate: status lookup failed (%s) — failing closed.", exc)
             raise HTTPException(
                 status_code=503,
                 detail="NDA verification status unavailable — try again shortly",
             )
-        logger.warning("NDA gate: status lookup failed (%s) — skipped (dev).", exc)
+        logger.warning("NDA gate: status lookup failed (%s) — skipped (dev opt-in).", exc)
         return
     if status.get("gate_passed"):
         return

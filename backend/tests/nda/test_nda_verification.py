@@ -202,7 +202,10 @@ def configured(monkeypatch):
     monkeypatch.setattr(jwt_auth, "JWT_SECRET_KEY", "")
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("MONGODB_URI", raising=False)
+    monkeypatch.delenv("ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
     monkeypatch.delenv("NDA_GATE_ENABLED", raising=False)
+    monkeypatch.delenv("NDA_GATE_DEV_FAIL_OPEN", raising=False)
 
 
 @pytest.fixture()
@@ -619,8 +622,8 @@ def test_gate_fails_closed_on_db_error_in_production(monkeypatch):
     assert getattr(exc.value, "status_code", None) == 503
 
 
-def test_gate_still_fails_open_without_database_in_dev(monkeypatch):
-    """No database configured at all (DatabaseNotConfiguredError) = dev mode."""
+def test_gate_fails_closed_without_database_by_default(monkeypatch):
+    """Audit: an unconfigured database must never silently bypass the gate."""
     import asyncio
 
     import app.database as database_module
@@ -631,12 +634,43 @@ def test_gate_still_fails_open_without_database_in_dev(monkeypatch):
         raise DatabaseNotConfiguredError("no DATABASE_URL")
 
     monkeypatch.setattr(database_module, "get_mongo_db", _raise)
-    monkeypatch.delenv("ENV", raising=False)
+    with pytest.raises(Exception) as exc:
+        asyncio.run(
+            enforce_nda_gate(
+                {"type": "jwt_token", "role": "candidate", "user_id": CANDIDATE_ID}
+            )
+        )
+    assert getattr(exc.value, "status_code", None) == 503
+
+
+def test_gate_dev_fail_open_requires_explicit_opt_in(monkeypatch):
+    """Only an explicit non-production opt-in may bypass a missing database."""
+    import asyncio
+
+    import app.database as database_module
+    from app.database import DatabaseNotConfiguredError
+    from app.nda import enforce_nda_gate
+
+    async def _raise():
+        raise DatabaseNotConfiguredError("no DATABASE_URL")
+
+    monkeypatch.setattr(database_module, "get_mongo_db", _raise)
+    monkeypatch.setenv("NDA_GATE_DEV_FAIL_OPEN", "true")
     asyncio.run(
         enforce_nda_gate(
             {"type": "jwt_token", "role": "candidate", "user_id": CANDIDATE_ID}
         )
-    )  # must not raise
+    )  # opt-in: must not raise
+
+    # Staging/production ignores the opt-in entirely.
+    monkeypatch.setenv("ENV", "staging")
+    with pytest.raises(Exception) as exc:
+        asyncio.run(
+            enforce_nda_gate(
+                {"type": "jwt_token", "role": "candidate", "user_id": CANDIDATE_ID}
+            )
+        )
+    assert getattr(exc.value, "status_code", None) == 503
 
 
 def test_upload_returns_503_when_pypdf2_missing(client, fake_db, monkeypatch):
@@ -740,24 +774,46 @@ async def test_gate_bypasses_guest_demo_sessions(fake_db):
 
 
 @pytest.mark.asyncio
-async def test_gate_disabled_by_env(fake_db, monkeypatch):
+async def test_gate_disabled_by_env_requires_dev_opt_in(fake_db, monkeypatch):
     monkeypatch.setenv("NDA_GATE_ENABLED", "false")
+    with pytest.raises(Exception) as exc:
+        await enforce_nda_gate(
+            {"type": "jwt_token", "role": "candidate", "user_id": CANDIDATE_ID}
+        )
+    assert exc.value.status_code == 503
+
+    monkeypatch.setenv("NDA_GATE_DEV_FAIL_OPEN", "true")
     await enforce_nda_gate(
         {"type": "jwt_token", "role": "candidate", "user_id": CANDIDATE_ID}
-    )
+    )  # explicit dev opt-in only
 
 
 @pytest.mark.asyncio
-async def test_gate_fails_open_without_database(monkeypatch):
+async def test_gate_fails_closed_on_unexpected_db_error(monkeypatch):
     import app.database as database_module
 
     async def _raise():
         raise RuntimeError("no database configured")
 
     monkeypatch.setattr(database_module, "get_mongo_db", _raise)
+    with pytest.raises(Exception) as exc:
+        await enforce_nda_gate(
+            {"type": "jwt_token", "role": "candidate", "user_id": CANDIDATE_ID}
+        )
+    assert exc.value.status_code == 503
+
+    monkeypatch.setenv("NDA_GATE_DEV_FAIL_OPEN", "true")
     await enforce_nda_gate(
         {"type": "jwt_token", "role": "candidate", "user_id": CANDIDATE_ID}
     )
+
+
+@pytest.mark.asyncio
+async def test_gate_fails_closed_when_candidate_identity_missing(fake_db):
+    with pytest.raises(Exception) as exc:
+        await enforce_nda_gate({"type": "jwt_token", "role": "candidate", "user_id": ""})
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == "NDA_IDENTITY_REQUIRED"
 
 
 # ---------------------------------------------------------------------------

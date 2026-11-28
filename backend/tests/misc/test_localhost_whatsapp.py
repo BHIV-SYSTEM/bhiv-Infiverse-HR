@@ -5,9 +5,14 @@ Test WhatsApp on Localhost with Real Credentials
 
 import sys
 import os
-sys.path.append('services/langgraph/app')
+# Import as a package: communication.py uses relative imports and cannot be
+# loaded as a top-level module (pytest collection failed with
+# "attempted relative import with no known parent package").
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
 
-from communication import comm_manager
+from services.langgraph.app.communication import comm_manager
 import asyncio
 
 async def test_localhost_whatsapp():

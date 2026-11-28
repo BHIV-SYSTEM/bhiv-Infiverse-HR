@@ -17,6 +17,7 @@ import os
 import sys
 
 import pytest
+from fastapi import HTTPException
 
 BACKEND_DIR = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -226,6 +227,72 @@ async def test_no_match_returns_none_without_crash(fake_db):
     fake_db([])
     cand = await workflow_proxy._resolve_candidate_document(auth_ctx())
     assert cand is None
+
+
+@pytest.mark.asyncio
+async def test_quarantine_is_checked_without_an_email_claim(fake_db, identity_store):
+    """Audit: a missing email claim must not disable the Niyantran check."""
+    from app.identity.models import CANONICAL_ID_QUARANTINED, IdentityRecord
+
+    fake_db([{"_id": "c", "email": "linked@example.com"}])
+    await identity_store.save_record(
+        IdentityRecord(
+            sampada_local_id="pravesh:bhiv_user_9",
+            source_reference="ABH-NOEMAIL",
+            email="linked@example.com",
+            canonical_id_status=CANONICAL_ID_QUARANTINED,
+        )
+    )
+    cand = await workflow_proxy._resolve_candidate_document(auth_ctx(email=None))
+    assert cand is None
+
+
+@pytest.mark.asyncio
+async def test_unverified_candidate_id_claim_cannot_resolve_a_document(fake_db):
+    """A JWT candidate_id is a hint, never authority over local records."""
+    fake_db(
+        [
+            {
+                "_id": "c",
+                "email": "linked@example.com",
+                "canonical_candidate_id": "cc_real",
+            }
+        ]
+    )
+    cand = await workflow_proxy._resolve_candidate_document(
+        auth_ctx(candidate_id="cc_attacker")
+    )
+    assert cand is None
+
+
+@pytest.mark.asyncio
+async def test_shared_password_never_overrides_quarantine(fake_db, monkeypatch):
+    """Audit: no authoritative candidate record means credentials are withheld."""
+    monkeypatch.setattr(workflow_proxy, "WORKFLOW_API_BASE_URL", "https://workflow.test")
+    monkeypatch.setattr(workflow_proxy, "WORKFLOW_USER_PASSWORD", "shared-secret")
+    fake_db(
+        [
+            {
+                "_id": "q",
+                "email": "linked@example.com",
+                "canonical_id_status": "QUARANTINED",
+            }
+        ]
+    )
+    with pytest.raises(HTTPException) as exc:
+        await workflow_proxy._credentials_for_candidate(auth_ctx())
+    assert exc.value.status_code == 403
+    assert "authoritatively resolved" in str(exc.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_no_local_record_never_falls_back_to_shared_password(fake_db, monkeypatch):
+    monkeypatch.setattr(workflow_proxy, "WORKFLOW_API_BASE_URL", "https://workflow.test")
+    monkeypatch.setattr(workflow_proxy, "WORKFLOW_USER_PASSWORD", "shared-secret")
+    fake_db([])
+    with pytest.raises(HTTPException) as exc:
+        await workflow_proxy._credentials_for_candidate(auth_ctx())
+    assert exc.value.status_code == 403
 
 
 # ---------------------------------------------------------------------------

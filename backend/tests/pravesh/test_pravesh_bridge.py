@@ -166,7 +166,9 @@ def test_header_token_accepted_for_api_clients():
 
 
 def test_role_mapping_admin_recruiter_candidate_unknown():
-    assert bridge.map_role({"roles": ["admin"]}) == "admin"
+    # Audit: upstream admin is demoted — external SSO never becomes a local
+    # platform admin. Raw roles remain in auth["pravesh"]["roles"] for audit.
+    assert bridge.map_role({"roles": ["admin"]}) == "recruiter"
     assert bridge.map_role({"roles": ["recruiter"]}) == "recruiter"
     assert bridge.map_role({"roles": ["candidate"]}) == "candidate"
     # Unknown roles never escalate
@@ -380,3 +382,63 @@ def test_map_identity_ambiguous_match(monkeypatch):
     assert result["link_status"] == "ambiguous_match"
     assert result["linked_local_user_id"] is None
     assert result["local_identity"] == "pravesh:u1"
+
+
+# ---------------------------------------------------------------------------
+# P0 regression: external SSO privilege boundary
+# ---------------------------------------------------------------------------
+
+
+def test_pravesh_admin_cookie_cannot_pass_get_admin_auth(monkeypatch):
+    """A signed Pravesh admin token must never satisfy a local admin gate."""
+    import jwt_auth
+    from fastapi import Depends, FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+
+    @app.get("/admin-only")
+    def admin_only(auth: dict = Depends(jwt_auth.get_admin_auth)):
+        return {"role": auth.get("role")}
+
+    client = TestClient(app)
+    payload = dict(DEFAULT_PAYLOAD, roles=["admin"])
+    resp = client.get(
+        "/admin-only", cookies={"blackhole_token": make_token(payload)}
+    )
+    assert resp.status_code == 403
+
+
+def test_exchange_ignores_upstream_candidate_id_and_admin_role(
+    session_client, monkeypatch
+):
+    """SSO exchange mints a namespaced identity, never a local admin/candidate id."""
+    import routes.pravesh_routes as pravesh_routes
+
+    async def _no_registry(email):
+        return None
+
+    monkeypatch.setattr(pravesh_routes, "_abhiruchi_candidate_id", _no_registry)
+    monkeypatch.setenv("CANDIDATE_JWT_SECRET_KEY", "sso-exchange-test-secret")
+
+    payload = dict(
+        DEFAULT_PAYLOAD,
+        roles=["admin"],
+        candidate_id="attacker_supplied_candidate_id",
+    )
+    resp = session_client.post(
+        "/api/v1/pravesh/exchange", cookies={"blackhole_token": make_token(payload)}
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["user"]["role"] == "recruiter"
+    assert body["user"]["candidate_id"] is None
+    assert body["user"]["local_user_id"] == "pravesh:bhiv_user_1"
+
+    claims = pyjwt.decode(
+        body["token"], "sso-exchange-test-secret", algorithms=["HS256"]
+    )
+    assert claims["role"] == "recruiter"
+    assert claims["candidate_id"] is None
+    assert claims["candidate_id_verified"] is False
+    assert claims["auth_type"] == "pravesh_sso"

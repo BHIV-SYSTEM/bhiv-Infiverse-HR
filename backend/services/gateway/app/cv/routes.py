@@ -55,7 +55,21 @@ def _owner(auth: dict) -> str:
 
 
 def _is_service_or_admin(auth: dict) -> bool:
-    return auth.get("type") == "api_key" or str(auth.get("role", "")).lower() == "admin"
+    """True only for a machine credential or a locally minted admin JWT.
+
+    Audit (P0): an external Pravesh SSO identity is read-only. Even when the
+    upstream token claims ``admin``, it must never unlock another candidate's
+    CV/profile data. ``get_auth`` maps SSO admin to ``recruiter`` now, but the
+    explicit type check keeps the boundary correct if that mapping changes.
+    """
+    if (
+        str(auth.get("type") or "") == "pravesh_sso"
+        or str(auth.get("auth_type") or "") == "pravesh_sso"
+    ):
+        return False
+    if auth.get("type") == "api_key":
+        return True
+    return auth.get("type") == "jwt_token" and str(auth.get("role", "")).lower() == "admin"
 
 
 async def _load_candidate(candidate_id: str) -> Optional[dict]:
@@ -176,6 +190,14 @@ async def create_draft(
     store=Depends(service.get_cv_store),
 ):
     uid = _owner(auth)
+    # Audit (P0): a caller-supplied candidate_id must never point a draft at
+    # someone else's identity. Only service/admin principals may supply one.
+    if body.candidate_id and not _is_service_or_admin(auth):
+        if str(body.candidate_id) != str(uid):
+            raise HTTPException(
+                status_code=403,
+                detail="candidate_id must match the authenticated user",
+            )
     template = body.template if body.template in TEMPLATES else "professional"
     content = body.content or default_content()
     doc = {

@@ -5785,9 +5785,41 @@ async def create_guest_session():
     }
 
 
+def _require_candidate_profile_access(candidate_id: str, auth: dict) -> None:
+    """Authorize access to one candidate's private profile/CV data.
+
+    Audit (P0): a Pravesh SSO identity is read-only and namespaced
+    (``pravesh:<id>``). It must never be treated as a local admin/service
+    principal, and its unverified upstream claims must never authorize
+    access to another candidate's record.
+    """
+    if (
+        str(auth.get("type") or "") == "pravesh_sso"
+        or str(auth.get("auth_type") or "") == "pravesh_sso"
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="External SSO sessions cannot access candidate profiles",
+        )
+    if auth.get("type") == "api_key":
+        return
+    uid = str(auth.get("user_id") or "").strip()
+    if uid and uid == str(candidate_id):
+        return
+    # Locally minted platform-admin JWTs remain the only privileged human
+    # principal allowed to inspect candidate records.
+    if (
+        auth.get("type") == "jwt_token"
+        and str(auth.get("role") or "").strip().lower() == "admin"
+    ):
+        return
+    raise HTTPException(status_code=403, detail="You can only access your own profile")
+
+
 @app.get("/v1/candidate/profile/{candidate_id}", tags=["Candidate Portal"])
 async def get_candidate_profile(candidate_id: str, auth = Depends(get_auth)):
     """Get Candidate Profile (JWT authenticated)"""
+    _require_candidate_profile_access(candidate_id, auth)
     try:
         db = await get_mongo_db()
         
@@ -5851,6 +5883,7 @@ async def update_candidate_profile(candidate_id: str, profile_data: CandidatePro
     """Update Candidate Profile"""
     from app.nda import enforce_nda_gate
 
+    _require_candidate_profile_access(candidate_id, auth)
     await enforce_nda_gate(auth)  # NDA gate: profile edits wait for a verified NDA
     try:
         db = await get_mongo_db()
@@ -5908,6 +5941,7 @@ async def apply_for_job(application: JobApplication, auth = Depends(get_auth)):
     """Apply for Job"""
     from app.nda import enforce_nda_gate
 
+    _require_candidate_profile_access(str(application.candidate_id), auth)
     await enforce_nda_gate(auth)  # NDA gate: no applications before a verified NDA
     try:
         db = await get_mongo_db()

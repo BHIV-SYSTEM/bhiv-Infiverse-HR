@@ -289,6 +289,12 @@ async def resolve_quarantine(
             detail="resolution must be 'released' or 'confirmed'",
         )
 
+    # Audit: ``resolved_by`` is NEVER taken from the request body. The actor
+    # is the authenticated principal (service API key or platform admin).
+    principal = str(auth.get("user_id") or auth.get("sub") or "").strip()
+    if not principal:
+        raise HTTPException(status_code=403, detail="No authenticated reviewer identity")
+
     doc = await store.get_quarantine(quarantine_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Quarantine not found")
@@ -305,7 +311,9 @@ async def resolve_quarantine(
 
     doc["status"] = "closed"
     doc["resolution"] = resolution
-    doc["resolved_by"] = body.resolved_by or str(auth.get("user_id") or "")
+    # Deliberately ignore ``body.resolved_by`` (spoofable); audit the real
+    # authenticated principal instead.
+    doc["resolved_by"] = principal
     doc["resolved_at"] = service.utc_now_iso()
     if body.note:
         doc["resolution_note"] = str(body.note)[:500]

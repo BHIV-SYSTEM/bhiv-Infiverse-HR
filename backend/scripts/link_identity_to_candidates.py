@@ -35,6 +35,7 @@ import os
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
+from typing import Optional
 
 from dotenv import load_dotenv
 from pymongo import MongoClient
@@ -82,6 +83,38 @@ def _candidate_canonical_ids(cand: dict) -> set:
         if val:
             out.add(val)
     return out
+
+
+def _fresh_candidate(candidates, cand_id) -> Optional[dict]:
+    """Re-read immediately before a write (the earlier scan may be stale)."""
+    if hasattr(candidates, "find_one"):
+        return candidates.find_one({"_id": cand_id})
+    matches = list(candidates.find({"_id": cand_id}))
+    return matches[0] if matches else None
+
+
+def _link_is_safe(fresh: dict, local_id: str, canonical: str) -> tuple:
+    """Compare-and-set guard: never take over a changed/foreign link.
+
+    Audit: the initial email/canonical scan happens before this write. A
+    concurrent run (or a second identity sharing the same email) can change
+    the candidate in between. Re-reading and checking ownership prevents a
+    duplicate-email match from overwriting another identity's canonical id
+    or reverse link.
+    """
+    if fresh is None:
+        return False, "candidate_disappeared"
+    existing_link = str(fresh.get("identity_local_id") or "").strip()
+    if existing_link and existing_link != str(local_id):
+        return False, f"identity_link_taken:{existing_link}"
+    if canonical and str(fresh.get("canonical_candidate_id") or "").strip():
+        if str(fresh["canonical_candidate_id"]).strip() != canonical:
+            return False, "canonical_id_conflict"
+    if canonical:
+        other_ids = _candidate_canonical_ids(fresh) - {canonical}
+        if other_ids:
+            return False, "legacy_id_conflict"
+    return True, ""
 
 
 def main() -> int:
@@ -191,9 +224,20 @@ def main() -> int:
             )
             continue
 
+        # Audit (duplicate-email overwrite): re-read under the write path and
+        # compare against the authoritative current document before stamping.
+        fresh = _fresh_candidate(db.candidates, cand["_id"])
+        safe, reason = _link_is_safe(fresh, local_id, canonical)
+        if not safe:
+            report["conflict"].append(
+                (local_id, str(cand["_id"]), reason, canonical or "-")
+            )
+            continue
+        fresh_canonical = str(fresh.get("canonical_candidate_id") or "").strip()
+
         entry = (local_id, str(cand["_id"]), match_how, status)
-        already_linked = str(cand.get("identity_local_id") or "") == str(local_id)
-        canonical_stamped = bool(cand_canonical)
+        already_linked = str(fresh.get("identity_local_id") or "") == str(local_id)
+        canonical_stamped = bool(fresh_canonical)
         needs_write = (not already_linked) or (bool(canonical) and not canonical_stamped)
         if not needs_write:
             # Idempotent re-run: link + canonical already consistent.
@@ -206,10 +250,27 @@ def main() -> int:
                 "identity_linked_at": now,
                 "identity_link_source": match_how,
             }
-            if canonical and not cand_canonical:
+            if canonical and not fresh_canonical:
                 set_fields["canonical_candidate_id"] = canonical
                 set_fields["canonical_id_status"] = status or "VERIFIED"
-            db.candidates.update_one({"_id": cand["_id"]}, {"$set": set_fields})
+            # Compare-and-set: the update only applies if the freshly-read
+            # ownership/id state is still unchanged. A concurrent writer wins
+            # by making our filter match nothing; we never overwrite it.
+            write_filter = {
+                "_id": cand["_id"],
+                "identity_local_id": {"$in": [None, "", local_id]},
+            }
+            if canonical and not fresh_canonical:
+                write_filter["canonical_candidate_id"] = {
+                    "$in": [None, "", canonical]
+                }
+            result = db.candidates.update_one(write_filter, {"$set": set_fields})
+            matched = getattr(result, "matched_count", 1)
+            if matched == 0:
+                report["conflict"].append(
+                    (local_id, str(cand["_id"]), "cas_write_lost", canonical or "-")
+                )
+                continue
         report["linked"].append(entry)
 
     print("\n===== identity -> candidate linking report =====")

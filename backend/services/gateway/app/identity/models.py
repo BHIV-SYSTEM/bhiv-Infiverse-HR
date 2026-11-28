@@ -151,7 +151,10 @@ class QuarantineResolveRequest(BaseModel):
 
     resolution: str  # "released" | "confirmed"
     note: Optional[str] = None
-    resolved_by: Optional[str] = None
+    # Deprecated/ignored: the authenticated principal is authoritative.
+    # Retained for backwards compatibility with older clients; the route
+    # never uses this value for the audit record.
+    resolved_by: Optional[str] = Field(default=None, exclude=True)
 
 
 class EnrolmentCandidate(BaseModel):

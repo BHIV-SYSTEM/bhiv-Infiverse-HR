@@ -52,12 +52,17 @@ DEFAULT_APP_SLUG = "sampada"
 DEFAULT_HEADER_NAME = "X-Pravesh-Token"
 IDENTITY_PREFIX = "pravesh:"
 
-# Pravesh role claim -> local platform role (never grants more than claimed)
+# Pravesh role claim -> local platform role.
+# Audit (P0): an external SSO token is NEVER allowed to become a Sampada
+# platform admin. Upstream "admin" is deliberately downgraded to recruiter;
+# raw roles stay available under ``auth["pravesh"]["roles"]`` for auditing.
+# Privileged local roles (admin/service) can only come from a locally minted
+# gateway JWT or an API key — never from this bridge.
 _ROLE_MAP = {
-    "admin": "admin",
+    "admin": "recruiter",
     "recruiter": "recruiter",
     "candidate": "candidate",
-    "client": "client",
+    "client": "candidate",
 }
 
 
@@ -181,7 +186,10 @@ def identity_from_request(request) -> Optional[Dict[str, Any]]:
     roles = [str(r) for r in (payload.get("roles") or [])]
     return {
         "user_id": str(payload.get("user_id")),
-        "candidate_id": payload.get("candidate_id"),
+        # Audit (P0): an upstream ``candidate_id`` claim is NOT authoritative.
+        # It is dropped here so no caller can accidentally use it as a local
+        # candidate identity. Canonical IDs must be resolved from the local
+        # identity store / Abhiruchi registry instead.
         "institute_code": payload.get("institute_code"),
         "cohort_id": payload.get("cohort_id"),
         "email": payload.get("email"),

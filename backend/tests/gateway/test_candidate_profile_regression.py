@@ -124,3 +124,37 @@ def test_no_fields_returns_success_false_without_error_status(db):
     assert result["success"] is False
     assert "No fields" in result.get("error", "")
     assert db.candidates.updates == []
+
+
+@pytest.mark.parametrize(
+    "auth",
+    [
+        {"type": "pravesh_sso", "role": "candidate", "user_id": "pravesh:u1"},
+        {"type": "jwt_token", "auth_type": "pravesh_sso", "role": "recruiter", "user_id": "pravesh:u1"},
+        {"type": "jwt_token", "role": "candidate", "user_id": "cand_1"},
+    ],
+)
+def test_profile_access_is_scoped_to_the_authenticated_candidate(auth):
+    """Cross-candidate and external-SSO access must fail before any DB work."""
+    with pytest.raises(HTTPException) as exc:
+        main_module._require_candidate_profile_access("cand_2", auth)
+    assert exc.value.status_code == 403
+
+
+def test_platform_admin_and_api_key_may_read_any_profile():
+    for auth in (
+        {"type": "jwt_token", "role": "admin", "user_id": "admin_1"},
+        {"type": "api_key", "role": "admin", "user_id": "service"},
+    ):
+        main_module._require_candidate_profile_access("cand_2", auth)
+
+
+def test_cross_candidate_profile_update_is_blocked(db):
+    with pytest.raises(HTTPException) as exc:
+        _run(
+            update_candidate_profile(
+                "cand_2", CandidateProfileUpdate(name="Hacked"), auth=AUTH
+            )
+        )
+    assert exc.value.status_code == 403
+    assert db.candidates.updates == []

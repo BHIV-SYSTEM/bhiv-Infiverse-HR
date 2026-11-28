@@ -69,7 +69,8 @@ def main():
         status = "✅ PASS" if result["success"] else "❌ FAIL"
         print(f"  {status} {method} {endpoint} - {description}")
         if not result["success"]:
-            print(f"       Error: {result.get('error', f'HTTP {result["status_code"]}')}")
+            error_text = result.get("error") or f"HTTP {result.get('status_code')}"
+            print(f"       Error: {error_text}")
 
     print()
     print("🔄 PHASE 2: Testing Duplicate Removal")

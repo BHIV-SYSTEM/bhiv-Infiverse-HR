@@ -715,12 +715,18 @@ def test_quarantine_list_and_resolve_released(api_client):
     # Release restores the previous canonical status and unblocks publishing.
     resolved = api_client.post(
         f"/api/v1/identity/quarantine/{qid}/resolve",
-        json={"resolution": "released", "note": "verified with source", "resolved_by": "admin-test"},
+        # Audit: a spoofed reviewer name must be ignored; the api-key
+        # principal is the only authoritative resolved_by.
+        json={"resolution": "released", "note": "verified with source", "resolved_by": "attacker-spoof"},
         headers=AUTH,
     )
     assert resolved.status_code == 200, resolved.text
     assert resolved.json()["resolution"] == "released"
     assert resolved.json()["record_status"] == "VERIFIED"
+    resolved_doc = api_client.get(
+        "/api/v1/identity/quarantine?status=closed", headers=AUTH
+    ).json()["quarantines"][0]
+    assert resolved_doc["resolved_by"] == "service"
 
     publish = api_client.post(
         "/api/v1/identity/enrolment/publish",

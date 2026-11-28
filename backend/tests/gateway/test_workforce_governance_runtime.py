@@ -25,7 +25,8 @@ pytestmark = pytest.mark.e2e_unit
 
 
 def test_lineage_envelope_required_fields():
-    env = LineageEnvelope.from_request(correlation_id="cid-1", trace_id="trace-1")
+    trace_id = "11111111-1111-4111-8111-111111111111"
+    env = LineageEnvelope.from_request(correlation_id="cid-1", trace_id=trace_id)
     payload = env.to_dict()
     for field in (
         "origin_system",
@@ -37,6 +38,19 @@ def test_lineage_envelope_required_fields():
         "visibility_scope",
     ):
         assert field in payload
+    assert payload["trace_id"] == trace_id
+
+
+def test_lineage_envelope_rejects_non_uuid_trace_and_never_copies_correlation():
+    import pytest
+
+    with pytest.raises(ValueError, match="UUIDv4"):
+        LineageEnvelope.from_request(correlation_id="cid-1", trace_id="trace-1")
+
+    env = LineageEnvelope.from_request(correlation_id="cid-1")
+    assert env.trace_id != "cid-1"
+    assert len(env.trace_id.split("-")) == 5
+    assert env.trace_id[14] == "4"
 
 
 def test_workforce_types_are_supported_set():

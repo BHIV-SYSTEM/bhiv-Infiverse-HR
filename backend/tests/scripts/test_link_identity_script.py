@@ -69,12 +69,21 @@ class FakeCollection:
             if key == "$or":
                 if not any(FakeCollection._match(doc, w) for w in want):
                     return False
+            elif isinstance(want, dict) and "$in" in want:
+                if doc.get(key) not in want["$in"]:
+                    return False
             elif str(doc.get(key)) != str(want):
                 return False
         return True
 
     def find(self, flt=None, projection=None):
         return FakeCursor([d for d in self.docs if self._match(d, flt)])
+
+    def find_one(self, flt=None, projection=None):
+        for doc in self.docs:
+            if self._match(doc, flt):
+                return dict(doc)
+        return None
 
     def update_one(self, flt, update, upsert=False):
         self.updates.append((flt, update))
@@ -221,3 +230,86 @@ def test_streaming_cursor_has_no_silent_5000_limit(script, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "processed  : 5100" in out
     assert "unlinked   : 5100" in out
+
+
+def test_duplicate_email_never_takes_over_an_existing_link(script, monkeypatch, capsys):
+    """Two identities sharing one email must not overwrite each other."""
+    db = FakeDB(
+        identities=[
+            {
+                "_id": "i1",
+                "sampada_local_id": "sd_first",
+                "canonical_candidate_id": "cc_first",
+                "canonical_id_status": "VERIFIED",
+                "email": "shared@example.com",
+            },
+            {
+                "_id": "i2",
+                "sampada_local_id": "sd_second",
+                "canonical_candidate_id": "cc_second",
+                "canonical_id_status": "VERIFIED",
+                "email": "shared@example.com",
+            },
+        ],
+        candidates=[{"_id": "c1", "email": "shared@example.com"}],
+    )
+    rc = _run(script, monkeypatch, db, "--apply")
+    assert rc == 0
+    cand = db.candidates.docs[0]
+    assert cand["identity_local_id"] == "sd_first"
+    assert cand["canonical_candidate_id"] == "cc_first"
+    out = capsys.readouterr().out
+    assert "conflict   : 1" in out
+    assert "identity_link_taken:sd_first" in out
+
+
+class _UpdateResult:
+    def __init__(self, matched_count):
+        self.matched_count = matched_count
+
+
+class _RacingCollection(FakeCollection):
+    """Mutates the document after the pre-write re-read (simulated race)."""
+
+    def __init__(self, docs):
+        super().__init__(docs)
+        self._race_pending = True
+
+    def find_one(self, flt=None, projection=None):
+        fresh = super().find_one(flt)
+        if self._race_pending and fresh is not None:
+            self._race_pending = False
+            for doc in self.docs:
+                doc["identity_local_id"] = "sd_other_run"
+                doc["canonical_candidate_id"] = "cc_other_run"
+        return fresh
+
+    def update_one(self, flt, update, upsert=False):
+        super().update_one(flt, update, upsert)
+        # The compare-and-set filter no longer matches the mutated document.
+        return _UpdateResult(matched_count=0)
+
+
+def test_cas_write_lost_never_overwrites_concurrent_update(script, monkeypatch, capsys):
+    """A concurrent writer between re-read and update wins (compare-and-set)."""
+    db = FakeDB(
+        identities=[
+            {
+                "_id": "i1",
+                "sampada_local_id": "sd_a",
+                "canonical_candidate_id": "cc_a",
+                "canonical_id_status": "VERIFIED",
+                "email": "a@example.com",
+            }
+        ],
+        candidates=[{"_id": "c1", "email": "a@example.com"}],
+    )
+    db.candidates = _RacingCollection(db.candidates.docs)
+    rc = _run(script, monkeypatch, db, "--apply")
+    assert rc == 0
+    cand = db.candidates.docs[0]
+    assert cand["identity_local_id"] == "sd_other_run"
+    assert cand["canonical_candidate_id"] == "cc_other_run"
+    out = capsys.readouterr().out
+    assert "conflict   : 1" in out
+    assert "cas_write_lost" in out

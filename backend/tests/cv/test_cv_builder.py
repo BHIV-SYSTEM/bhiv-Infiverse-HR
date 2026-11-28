@@ -57,6 +57,9 @@ def configured(monkeypatch):
     # Force the memory store — no Mongo in tests, no network, no hangs
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("MONGODB_URI", raising=False)
+    # These tests run without Mongo; the NDA gate is explicitly opted into
+    # dev fail-open rather than silently bypassed.
+    monkeypatch.setenv("NDA_GATE_DEV_FAIL_OPEN", "true")
     monkeypatch.delenv("PRAVESH_JWT_SECRET", raising=False)
     monkeypatch.setattr(service, "_MEMORY", service.InMemoryCVStore())
 
@@ -147,6 +150,27 @@ def test_prefill_labels_provenance_and_asks_for_missing(client, with_profile):
     assert "professional_summary" in q_fields
     assert body["policy"]["no_invention"] is True
     assert body["policy"]["ask_dont_guess"] is True
+
+
+def test_draft_cannot_be_created_for_another_candidate(client):
+    """Audit (P0): a caller-supplied candidate_id must not redirect a draft."""
+    resp = client.post(
+        "/api/v1/cv/drafts",
+        headers=bearer(USER_A),
+        json={"candidate_id": USER_B, "template": "modern"},
+    )
+    assert resp.status_code == 403
+    assert "candidate_id" in resp.json()["detail"].lower()
+
+
+def test_draft_with_own_candidate_id_is_allowed(client):
+    resp = client.post(
+        "/api/v1/cv/drafts",
+        headers=bearer(USER_A),
+        json={"candidate_id": USER_A, "template": "modern"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["draft"]["user_id"] == USER_A
 
 
 def test_prefill_without_record_reports_all_none(client):

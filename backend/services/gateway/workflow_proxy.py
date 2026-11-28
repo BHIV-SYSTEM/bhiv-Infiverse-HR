@@ -146,23 +146,44 @@ def _parse_stored_workflow_password(stored: Any) -> Optional[str]:
         return None
 
 
-async def _identity_quarantined(email: str) -> bool:
-    """True when the identity store has a QUARANTINED record for this email.
+def _is_quarantined_record(rec: Any) -> bool:
+    return str(getattr(rec, "canonical_id_status", "") or "").upper() == "QUARANTINED"
 
-    Audit: quarantined identities must never resolve to workflow
-    credentials / task payloads. Fails closed on unexpected errors.
+
+async def _identity_quarantined(auth: dict) -> bool:
+    """True when ANY identity matching this auth context is quarantined.
+
+    Audit (P0): a quarantine lookup must not depend on the presence of an
+    email claim. SSO/canonical-id tokens may carry no email; in that case the
+    identity store is queried by the local user id and by the (untrusted)
+    candidate-id claim. A signed JWT claim is only an identifier hint — it is
+    never accepted as authoritative; the identity store is the authority.
+    Fails closed on lookup errors or when there is nothing to look up.
     """
-    if not email:
-        return False
+    email = str(auth.get("email") or "").strip()
+    user_id = str(auth.get("user_id") or "").strip()
+    claim = str(auth.get("candidate_id") or "").strip()
+    identifiers = [v for v in (user_id, claim) if v]
+    if not email and not identifiers:
+        logger.warning("Workflow lookup: no identity attributes — refusing resolution.")
+        return True
+
     try:
         from app.identity.service import get_identity_store
 
         store = await get_identity_store()
-        recs = await store.find_by_email_institute(email, None)
-        return any(
-            str(getattr(r, "canonical_id_status", "") or "").upper() == "QUARANTINED"
-            for r in recs
-        )
+        if email:
+            for rec in await store.find_by_email_institute(email, None):
+                if _is_quarantined_record(rec):
+                    return True
+        for value in identifiers:
+            for rec in (
+                await store.get_by_local_id(value),
+                await store.get_by_canonical_id(value),
+            ):
+                if rec is not None and _is_quarantined_record(rec):
+                    return True
+        return False
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning(
             "Identity store unavailable while checking quarantine for workflow "
@@ -204,10 +225,11 @@ async def _resolve_candidate_document(auth: dict) -> Optional[Dict[str, Any]]:
     user_id = str(auth.get("user_id") or "").strip()
     email = (auth.get("email") or "").strip()
 
-    # Quarantined identity in the identity store -> never resolve.
-    if email and await _identity_quarantined(email):
+    # Audit (P0): quarantine lookup by email OR identity (missing-email SSO /
+    # canonical-id JWTs). Never rely on a claim alone.
+    if await _identity_quarantined(auth):
         logger.warning(
-            "Workflow lookup: identity for this email is QUARANTINED — "
+            "Workflow lookup: identity is QUARANTINED or unresolved — "
             "refusing candidate resolution."
         )
         return None
@@ -220,6 +242,23 @@ async def _resolve_candidate_document(auth: dict) -> Optional[Dict[str, Any]]:
         except TypeError:  # pragma: no cover - minimal test doubles
             return list(db.candidates.find(flt))
 
+    claim = str(auth.get("candidate_id") or "").strip()
+
+    def _claim_is_authoritative(cand: Dict[str, Any]) -> bool:
+        """A JWT/SSO candidate_id claim is only a hint, never an authority.
+
+        When a claim is present it must match an identifier on the resolved
+        local candidate document. Otherwise the token is treated as
+        unverified and resolution is refused (fail closed).
+        """
+        if not claim:
+            return True
+        return claim in {
+            str(cand.get("canonical_candidate_id") or ""),
+            str(cand.get("id") or ""),
+            str(cand.get("candidate_id") or ""),
+        }
+
     def _narrow(matches: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """Return the single unambiguous match, or None (isolated)."""
         if len(matches) == 1:
@@ -228,6 +267,12 @@ async def _resolve_candidate_document(auth: dict) -> Optional[Dict[str, Any]]:
                 logger.warning(
                     "Workflow lookup: candidate document is QUARANTINED — "
                     "refusing resolution."
+                )
+                return None
+            if not _claim_is_authoritative(cand):
+                logger.warning(
+                    "Workflow lookup: candidate_id claim does not match the "
+                    "resolved local record — refusing resolution."
                 )
                 return None
             return cand
@@ -242,7 +287,11 @@ async def _resolve_candidate_document(auth: dict) -> Optional[Dict[str, Any]]:
                     str(m.get("candidate_id") or ""),
                 )
             ]
-            if len(narrowed) == 1 and not _is_quarantined_doc(narrowed[0]):
+            if (
+                len(narrowed) == 1
+                and not _is_quarantined_doc(narrowed[0])
+                and _claim_is_authoritative(narrowed[0])
+            ):
                 return narrowed[0]
         if len(matches) > 1:
             logger.warning(
@@ -256,10 +305,10 @@ async def _resolve_candidate_document(auth: dict) -> Optional[Dict[str, Any]]:
     if user_id and ObjectId.is_valid(user_id):
         cand = await db.candidates.find_one({"_id": ObjectId(user_id)})
         if cand:
-            if _is_quarantined_doc(cand):
+            if _is_quarantined_doc(cand) or not _claim_is_authoritative(cand):
                 logger.warning(
-                    "Workflow lookup: candidate document is QUARANTINED — "
-                    "refusing resolution."
+                    "Workflow lookup: candidate is quarantined or the JWT "
+                    "candidate_id claim is unverified — refusing resolution."
                 )
                 return None
             return cand
@@ -324,14 +373,29 @@ async def _credentials_for_candidate(auth: dict) -> Tuple[str, str]:
 
     try:
         cand = await _resolve_candidate_document(auth)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.warning("Workflow credentials: candidate lookup failed (%s)", exc)
-        cand = None
-    if cand:
-        alt = (cand.get("workflow_employee_email") or "").strip()
-        if alt:
-            workflow_email = alt
-        password = _parse_stored_workflow_password(cand.get("workflow_password"))
+        raise HTTPException(
+            status_code=503,
+            detail="Workflow identity lookup is unavailable — try again shortly.",
+        ) from exc
+    if cand is None:
+        # Audit (P0): no authoritative candidate record means quarantine /
+        # ambiguity / unverified claims. Falling back to a JWT email plus a
+        # shared workflow password bypasses Niyantran — never do that.
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Candidate identity could not be authoritatively resolved — "
+                "workflow credentials are withheld."
+            ),
+        )
+    alt = (cand.get("workflow_employee_email") or "").strip()
+    if alt:
+        workflow_email = alt
+    password = _parse_stored_workflow_password(cand.get("workflow_password"))
 
     if not password:
         password = WORKFLOW_USER_PASSWORD or None
@@ -545,12 +609,19 @@ async def _resolve_portal_candidate_id(
         return candidate_id or "api"
     uid = str(auth.get("user_id") or "")
 
-    canonical = str(auth.get("candidate_id") or "").strip()  # preserved claim
+    # Audit (P0): the JWT candidate_id claim is NOT authoritative. Only an
+    # identifier resolved from the local candidate/identity record is emitted.
+    canonical = ""
     try:
         cand = await _resolve_candidate_document(auth)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.warning("portal candidate id lookup failed (%s)", exc)
-        cand = None
+        raise HTTPException(
+            status_code=503,
+            detail="Candidate identity lookup is unavailable — try again shortly.",
+        ) from exc
     if cand:
         canonical = str(cand.get("canonical_candidate_id") or "").strip()
         if not canonical:
@@ -681,11 +752,21 @@ async def workflow_link_save(body: WorkflowLinkBody, auth: dict = Depends(get_ca
 
     from app.database import get_mongo_db
 
+    if await _identity_quarantined(auth):
+        raise HTTPException(
+            status_code=403,
+            detail="Identity is quarantined — workflow credentials cannot be stored.",
+        )
     try:
         cand = await _resolve_candidate_document(auth)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.warning("workflow-link: candidate lookup failed (%s)", exc)
-        cand = None
+        raise HTTPException(
+            status_code=503,
+            detail="Candidate identity lookup is unavailable — try again shortly.",
+        ) from exc
 
     if cand is not None:
         target_filter: Dict[str, Any] = {"_id": cand["_id"]}
@@ -733,11 +814,21 @@ async def workflow_link_delete(auth: dict = Depends(get_candidate_auth)):
 
     from app.database import get_mongo_db
 
+    if await _identity_quarantined(auth):
+        raise HTTPException(
+            status_code=403,
+            detail="Identity is quarantined — workflow credentials cannot be changed.",
+        )
     try:
         cand = await _resolve_candidate_document(auth)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.warning("workflow-link-delete: candidate lookup failed (%s)", exc)
-        cand = None
+        raise HTTPException(
+            status_code=503,
+            detail="Candidate identity lookup is unavailable — try again shortly.",
+        ) from exc
 
     if cand is not None:
         target_filter = {"_id": cand["_id"]}

@@ -5,7 +5,15 @@ Test WhatsApp Integration via Portal System
 
 import sys
 import os
-sys.path.append('services/portal')
+# Resolve the service path relative to this file; pytest is usually invoked
+# from the repository root, where the old relative sys.path entry was empty.
+_SERVICE_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "services",
+    "portal",
+)
+if _SERVICE_DIR not in sys.path:
+    sys.path.insert(0, _SERVICE_DIR)
 
 from email_automation import trigger_interview_notification, trigger_shortlist_notification
 
